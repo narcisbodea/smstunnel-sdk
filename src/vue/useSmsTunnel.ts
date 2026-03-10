@@ -4,7 +4,6 @@ import type { SmsTunnelLabels } from '../shared/labels';
 export interface UseSmsTunnelOptions {
   apiBaseUrl: string;
   getAuthHeaders?: () => Record<string, string>;
-  routePrefix?: string;
   pollInterval?: number;
 }
 
@@ -18,9 +17,9 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
   const {
     apiBaseUrl,
     getAuthHeaders,
-    routePrefix = 'smstunnel',
     pollInterval = 3000,
   } = options;
+  const routePrefix = 'smstunnel';
 
   const baseUrl = apiBaseUrl.replace(/\/$/, '');
 

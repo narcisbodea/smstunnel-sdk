@@ -58,7 +58,7 @@ export class SmsTunnelService {
    * Public flow: POST /api/v1/pairing/public-create
    */
   private async createPairingTokenPublic(serverUrl: string): Promise<CreateTokenResult> {
-    const prefix = this.options.routePrefix || 'smstunnel';
+    const prefix = 'smstunnel';
     const callbackUrl = `${this.options.callbackBaseUrl.replace(/\/$/, '')}/${prefix}/callback`;
 
     try {
@@ -103,7 +103,7 @@ export class SmsTunnelService {
    * Creates sub-accounts under the Enterprise account.
    */
   private async createPairingTokenEnterprise(serverUrl: string): Promise<CreateTokenResult> {
-    const prefix = this.options.routePrefix || 'smstunnel';
+    const prefix = 'smstunnel';
     const callbackUrl = `${this.options.callbackBaseUrl.replace(/\/$/, '')}/${prefix}/callback`;
 
     try {

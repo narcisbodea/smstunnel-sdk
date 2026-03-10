@@ -38,7 +38,7 @@ export class SmsTunnelController {
     @Inject(SMSTUNNEL_OPTIONS)
     private readonly options: SmsTunnelModuleOptions,
   ) {
-    this.prefix = options.routePrefix || 'smstunnel';
+    this.prefix = 'smstunnel';
   }
 
   /**

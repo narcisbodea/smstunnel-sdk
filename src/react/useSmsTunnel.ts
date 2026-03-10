@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type { SmsTunnelState, UseSmsTunnelOptions } from './types';
 
 export function useSmsTunnel(options: UseSmsTunnelOptions) {
-  const { apiBaseUrl, getAuthHeaders, routePrefix = 'smstunnel', pollInterval = 3000 } = options;
+  const { apiBaseUrl, getAuthHeaders, pollInterval = 3000 } = options;
+  const routePrefix = 'smstunnel';
 
   const [state, setState] = useState<SmsTunnelState>({
     status: 'loading',

@@ -11,14 +11,12 @@ export interface SmsTunnelPairingProps {
   showTestSms?: boolean;
   showServerUrlInput?: boolean;
   qrSize?: number;
-  routePrefix?: string;
   className?: string;
 }
 
 export interface UseSmsTunnelOptions {
   apiBaseUrl: string;
   getAuthHeaders?: () => Record<string, string>;
-  routePrefix?: string;
   pollInterval?: number;
 }
 

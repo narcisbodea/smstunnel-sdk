@@ -174,12 +174,11 @@ export function SmsTunnelPairing({
   showTestSms = true,
   showServerUrlInput = true,
   qrSize = 220,
-  routePrefix = 'smstunnel',
   className,
 }: SmsTunnelPairingProps) {
   injectKeyframes();
 
-  const tunnel = useSmsTunnel({ apiBaseUrl, getAuthHeaders, routePrefix });
+  const tunnel = useSmsTunnel({ apiBaseUrl, getAuthHeaders });
 
   const [localServerUrl, setLocalServerUrl] = useState('');
   const [savingUrl, setSavingUrl] = useState(false);

@@ -7,8 +7,6 @@ export interface SmsTunnelAngularConfig {
   apiBaseUrl: string;
   /** Function that returns auth headers (e.g. JWT) */
   getAuthHeaders?: () => Record<string, string>;
-  /** Route prefix (default: 'smstunnel') */
-  routePrefix?: string;
   /** Poll interval in ms (default: 3000) */
   pollInterval?: number;
 }
@@ -104,9 +102,7 @@ export class SmsTunnelService {
     return this.config.apiBaseUrl.replace(/\/$/, '');
   }
 
-  private get prefix(): string {
-    return this.config.routePrefix || 'smstunnel';
-  }
+  private readonly prefix = 'smstunnel';
 
   private authHeaders(): Record<string, string> {
     return this.config.getAuthHeaders ? this.config.getAuthHeaders() : {};

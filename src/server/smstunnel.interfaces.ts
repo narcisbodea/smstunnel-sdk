@@ -16,7 +16,6 @@ export interface SmsTunnelModuleOptions {
   callbackBaseUrl: string;
   displayName?: string;
   displayUrl?: string;
-  routePrefix?: string;
   enableLegacyCallback?: boolean;
 
   /** Enterprise App API Key for SaaS mode.

@@ -44,7 +44,6 @@ export const SmsTunnelPairing = defineComponent({
     showTestSms: { type: Boolean, default: true },
     showServerUrlInput: { type: Boolean, default: true },
     qrSize: { type: Number, default: 220 },
-    routePrefix: { type: String, default: 'smstunnel' },
   },
   emits: ['paired', 'unpaired'],
   setup(props, { emit }) {
@@ -53,7 +52,6 @@ export const SmsTunnelPairing = defineComponent({
     const tunnel = useSmsTunnel({
       apiBaseUrl: props.apiBaseUrl,
       getAuthHeaders: props.getAuthHeaders,
-      routePrefix: props.routePrefix,
     });
 
     const localServerUrl = ref('');

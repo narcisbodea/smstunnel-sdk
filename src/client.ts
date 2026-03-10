@@ -7,7 +7,6 @@
 export interface SmsTunnelClientOptions {
   apiBaseUrl: string;
   getAuthHeaders?: () => Record<string, string>;
-  routePrefix?: string;
   pollInterval?: number;
 }
 
@@ -169,14 +168,13 @@ export type PairingEventCallback = (event: 'completed' | 'expired' | 'error', da
 
 export class SmsTunnelClient {
   private readonly baseUrl: string;
-  private readonly prefix: string;
+  private readonly prefix = 'smstunnel';
   private readonly pollInterval: number;
   private readonly getAuthHeaders: () => Record<string, string>;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: SmsTunnelClientOptions) {
     this.baseUrl = options.apiBaseUrl.replace(/\/$/, '');
-    this.prefix = options.routePrefix || 'smstunnel';
     this.pollInterval = options.pollInterval || 3000;
     this.getAuthHeaders = options.getAuthHeaders || (() => ({}));
   }
