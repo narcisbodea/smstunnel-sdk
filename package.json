@@ -1,6 +1,6 @@
 {
   "name": "@narcisbodea/smstunnel-sdk",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "SMSTunnel SDK - Node.js + NestJS + React + Vue + Angular + framework-agnostic client for SMS pairing & E2E encryption",
   "author": "NARBOWEB SRL",
   "license": "MIT",
