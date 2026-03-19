@@ -7,10 +7,9 @@ import type {
   CreateTokenResult,
   PairingStatusResult,
   PairingCallbackBody,
+  PairWithApiKeyResult,
+  ExchangeKeysResult,
   SaasActivateResult,
-  DeviceE2EStatus,
-  DevicePublicKeyInfo,
-  VerifyDeviceKeyResult,
 } from './smstunnel.interfaces';
 
 @Injectable()
@@ -31,6 +30,8 @@ export class SmsTunnelService {
       paired: !!config.apiKey,
       serverUrl: config.serverUrl,
       deviceName: config.deviceName,
+      e2eEnabled: !!config.devicePublicKey,
+      deviceFingerprint: config.deviceFingerprint,
     };
   }
 
@@ -199,14 +200,26 @@ export class SmsTunnelService {
       return false;
     }
 
-    await this.options.storage.updateConfig({
+    const update: Record<string, any> = {
       apiKey: body.apiKey,
       deviceName: body.deviceName || 'Android Phone',
-    });
+    };
+    if (body.deviceId) {
+      update.deviceId = body.deviceId;
+    }
+    await this.options.storage.updateConfig(update);
 
     this.logger.log(
       `SMSTunnel paired! Device: ${body.deviceName}, API key: ${body.apiKey?.substring(0, 12)}...`,
     );
+
+    // Auto-exchange keys after pairing
+    if (body.deviceId) {
+      this.exchangeKeys().catch((err) =>
+        this.logger.warn(`Auto key exchange failed: ${err.message}`),
+      );
+    }
+
     return true;
   }
 
@@ -231,6 +244,56 @@ export class SmsTunnelService {
     await this.options.storage.updateConfig(update);
     this.logger.log(`SMSTunnel paired (legacy). Device: ${deviceName || 'unknown'}`);
     return true;
+  }
+
+  /**
+   * Pair using an API key directly (alternative to QR).
+   * Validates the key by calling /api/v1/devices, then saves it.
+   */
+  async pairWithApiKey(apiKey: string): Promise<PairWithApiKeyResult> {
+    const config = await this.options.storage.getConfig();
+    if (!config.serverUrl) {
+      return { success: false, error: 'SMSTunnel server URL is not configured.' };
+    }
+
+    const serverUrl = config.serverUrl.replace(/\/$/, '');
+
+    try {
+      const res = await fetch(`${serverUrl}/api/v1/devices`, {
+        headers: { 'X-API-Key': apiKey },
+      });
+
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          return { success: false, error: 'API key invalid or expired.' };
+        }
+        return { success: false, error: `SMSTunnel returned error: ${res.status}` };
+      }
+
+      const data: any = await res.json();
+      const devices = data?.devices || [];
+      const device = devices[0];
+      const deviceName = device?.name || 'Android Phone';
+      const deviceId = device?.id || device?._id;
+
+      const update: Record<string, any> = { apiKey, deviceName };
+      if (deviceId) update.deviceId = deviceId;
+      await this.options.storage.updateConfig(update);
+
+      this.logger.log(`Paired via API key. Device: ${deviceName}`);
+
+      // Auto-exchange keys
+      if (deviceId) {
+        this.exchangeKeys().catch((err) =>
+          this.logger.warn(`Auto key exchange failed: ${err.message}`),
+        );
+      }
+
+      return { success: true, deviceName };
+    } catch (err: any) {
+      this.logger.error(`Pair with API key error: ${err.message}`);
+      return { success: false, error: `Could not connect to SMSTunnel: ${err.message}` };
+    }
   }
 
   /**
@@ -350,37 +413,69 @@ export class SmsTunnelService {
   // ─── E2E Encryption ──────────────────────────────
 
   /**
-   * Get E2E encryption status for a device.
+   * Exchange encryption keys with the paired device.
+   * Fetches the device's public key from SMSTunnel server and stores it locally.
+   * Called automatically after pairing, or manually via POST /smstunnel/exchange-keys.
    */
-  async getDeviceE2EStatus(deviceId: string): Promise<{ success: boolean; data?: DeviceE2EStatus; error?: string }> {
-    return this.apiGet(`/api/v1/devices/${deviceId}/e2e-status`);
-  }
-
-  /**
-   * Get device public key for E2E encryption.
-   */
-  async getDevicePublicKey(deviceId: string): Promise<{ success: boolean; data?: DevicePublicKeyInfo; error?: string }> {
-    return this.apiGet(`/api/v1/devices/${deviceId}/public-key`);
-  }
-
-  /**
-   * Verify that a stored fingerprint matches the current device key.
-   */
-  async verifyDeviceKey(deviceId: string, storedFingerprint: string): Promise<VerifyDeviceKeyResult> {
-    const res = await this.getDeviceE2EStatus(deviceId);
-    if (!res.success || !res.data) {
-      return { valid: false, needsRePairing: true };
+  async exchangeKeys(): Promise<ExchangeKeysResult> {
+    const config = await this.options.storage.getConfig();
+    if (!config.apiKey || !config.serverUrl) {
+      return { success: false, error: 'SMSTunnel is not configured.' };
     }
-    const status = res.data;
-    if (!status.hasPublicKey || !status.publicKeyFingerprint) {
-      return { valid: false, needsRePairing: true };
+
+    const serverUrl = config.serverUrl.replace(/\/$/, '');
+
+    try {
+      // Resolve deviceId if we don't have it
+      let deviceId = config.deviceId;
+      if (!deviceId) {
+        const listRes = await fetch(`${serverUrl}/api/v1/devices`, {
+          headers: { 'X-API-Key': config.apiKey },
+        });
+        if (!listRes.ok) {
+          return { success: false, error: `Could not list devices: ${listRes.status}` };
+        }
+        const listData: any = await listRes.json();
+        const devices = listData?.devices || [];
+        if (devices.length === 0) {
+          return { success: false, error: 'No paired device found.' };
+        }
+        deviceId = devices[0].id || devices[0]._id;
+        await this.options.storage.updateConfig({ deviceId });
+      }
+
+      // Fetch device detail (includes publicKey)
+      const res = await fetch(`${serverUrl}/api/v1/devices/${deviceId}`, {
+        headers: { 'X-API-Key': config.apiKey },
+      });
+
+      if (!res.ok) {
+        return { success: false, error: `Could not fetch device: ${res.status}` };
+      }
+
+      const device: any = await res.json();
+
+      if (!device.publicKey) {
+        return { success: false, error: 'Device has no public key. Enable encryption in SMSTunnel app on the phone.' };
+      }
+
+      await this.options.storage.updateConfig({
+        deviceId,
+        devicePublicKey: device.publicKey,
+        deviceFingerprint: device.publicKeyFingerprint,
+        deviceName: device.name || config.deviceName,
+      });
+
+      this.logger.log(`E2E keys exchanged. Fingerprint: ${device.publicKeyFingerprint}`);
+      return {
+        success: true,
+        fingerprint: device.publicKeyFingerprint,
+        deviceName: device.name,
+      };
+    } catch (err: any) {
+      this.logger.error(`Key exchange error: ${err.message}`);
+      return { success: false, error: `Key exchange failed: ${err.message}` };
     }
-    const matches = status.publicKeyFingerprint === storedFingerprint;
-    return {
-      valid: matches,
-      currentFingerprint: status.publicKeyFingerprint,
-      needsRePairing: !matches,
-    };
   }
 
   /**

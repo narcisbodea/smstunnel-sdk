@@ -101,6 +101,15 @@ export class SmsTunnelController {
   }
 
   /**
+   * Pair using an API key directly (alternative to QR).
+   * Route: POST /{prefix}/pair-with-key
+   */
+  @Post('smstunnel/pair-with-key')
+  async pairWithKey(@Body() body: { apiKey: string }) {
+    return this.smsTunnelService.pairWithApiKey(body.apiKey);
+  }
+
+  /**
    * Unpair the connected device.
    * Route: POST /{prefix}/unpair
    */
@@ -170,30 +179,13 @@ export class SmsTunnelController {
   // ─── E2E Encryption ────────────────────────────────
 
   /**
-   * Get E2E encryption status for a device.
-   * Route: GET /{prefix}/e2e-status/:deviceId
+   * Exchange encryption keys with the paired device.
+   * Fetches the device's public key from SMSTunnel and stores it locally.
+   * Route: POST /{prefix}/exchange-keys
    */
-  @Get('smstunnel/e2e-status/:deviceId')
-  async e2eStatus(@Param('deviceId') deviceId: string) {
-    return this.smsTunnelService.getDeviceE2EStatus(deviceId);
-  }
-
-  /**
-   * Get device public key for E2E encryption.
-   * Route: GET /{prefix}/public-key/:deviceId
-   */
-  @Get('smstunnel/public-key/:deviceId')
-  async publicKey(@Param('deviceId') deviceId: string) {
-    return this.smsTunnelService.getDevicePublicKey(deviceId);
-  }
-
-  /**
-   * Verify device key fingerprint.
-   * Route: POST /{prefix}/verify-key
-   */
-  @Post('smstunnel/verify-key')
-  async verifyKey(@Body() body: { deviceId: string; fingerprint: string }) {
-    return this.smsTunnelService.verifyDeviceKey(body.deviceId, body.fingerprint);
+  @Post('smstunnel/exchange-keys')
+  async exchangeKeys() {
+    return this.smsTunnelService.exchangeKeys();
   }
 
   /**

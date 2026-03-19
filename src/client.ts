@@ -6,6 +6,9 @@
  */
 export interface SmsTunnelClientOptions {
   apiBaseUrl: string;
+  /** Return the current JWT/auth token. SDK adds Authorization: Bearer header automatically. */
+  getToken?: () => string | null;
+  /** Full control over auth headers. Takes precedence over getToken. */
   getAuthHeaders?: () => Record<string, string>;
   pollInterval?: number;
 }
@@ -176,7 +179,19 @@ export class SmsTunnelClient {
   constructor(options: SmsTunnelClientOptions) {
     this.baseUrl = options.apiBaseUrl.replace(/\/$/, '');
     this.pollInterval = options.pollInterval || 3000;
-    this.getAuthHeaders = options.getAuthHeaders || (() => ({}));
+
+    if (options.getAuthHeaders) {
+      this.getAuthHeaders = options.getAuthHeaders;
+    } else if (options.getToken) {
+      const getToken = options.getToken;
+      this.getAuthHeaders = (): Record<string, string> => {
+        const token = getToken();
+        if (token) return { Authorization: `Bearer ${token}` };
+        return {};
+      };
+    } else {
+      this.getAuthHeaders = () => ({});
+    }
   }
 
   // ─── Pairing ───────────────────────────────────────

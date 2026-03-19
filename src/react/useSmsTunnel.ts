@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type { SmsTunnelState, UseSmsTunnelOptions } from './types';
 
 export function useSmsTunnel(options: UseSmsTunnelOptions) {
-  const { apiBaseUrl, getAuthHeaders, pollInterval = 3000 } = options;
+  const { apiBaseUrl, getToken, getAuthHeaders, pollInterval = 3000 } = options;
   const routePrefix = 'smstunnel';
 
   const [state, setState] = useState<SmsTunnelState>({
@@ -22,8 +22,13 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
   const baseUrl = apiBaseUrl.replace(/\/$/, '');
 
   const authHeaders = useCallback((): Record<string, string> => {
-    return getAuthHeaders ? getAuthHeaders() : {};
-  }, [getAuthHeaders]);
+    if (getAuthHeaders) return getAuthHeaders();
+    if (getToken) {
+      const token = getToken();
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    return {};
+  }, [getAuthHeaders, getToken]);
 
   const fetchStatus = useCallback(async () => {
     try {

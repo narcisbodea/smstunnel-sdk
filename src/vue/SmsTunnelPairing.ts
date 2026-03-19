@@ -39,6 +39,7 @@ export const SmsTunnelPairing = defineComponent({
   name: 'SmsTunnelPairing',
   props: {
     apiBaseUrl: { type: String, required: true },
+    getToken: { type: Function as PropType<() => string | null>, default: undefined },
     getAuthHeaders: { type: Function as PropType<() => Record<string, string>>, default: undefined },
     labels: { type: Object as PropType<SmsTunnelLabels>, default: () => EN_LABELS },
     showTestSms: { type: Boolean, default: true },
@@ -51,6 +52,7 @@ export const SmsTunnelPairing = defineComponent({
 
     const tunnel = useSmsTunnel({
       apiBaseUrl: props.apiBaseUrl,
+      getToken: props.getToken,
       getAuthHeaders: props.getAuthHeaders,
     });
 

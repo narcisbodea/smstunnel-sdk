@@ -167,6 +167,7 @@ function injectKeyframes() {
 
 export function SmsTunnelPairing({
   apiBaseUrl,
+  getToken,
   getAuthHeaders,
   labels = EN_LABELS,
   onPaired,
@@ -178,7 +179,7 @@ export function SmsTunnelPairing({
 }: SmsTunnelPairingProps) {
   injectKeyframes();
 
-  const tunnel = useSmsTunnel({ apiBaseUrl, getAuthHeaders });
+  const tunnel = useSmsTunnel({ apiBaseUrl, getToken, getAuthHeaders });
 
   const [localServerUrl, setLocalServerUrl] = useState('');
   const [savingUrl, setSavingUrl] = useState(false);

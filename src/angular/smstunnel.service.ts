@@ -1,12 +1,14 @@
 import { Injectable, InjectionToken, inject } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { lastValueFrom } from 'rxjs';
 
 // ─── Configuration ──────────────────────────────────
 
 export interface SmsTunnelAngularConfig {
   /** Your backend base URL (where SmsTunnelModule is mounted) */
   apiBaseUrl: string;
-  /** Function that returns auth headers (e.g. JWT) */
-  getAuthHeaders?: () => Record<string, string>;
+  /** Function that returns the current JWT/auth token. SDK adds Authorization: Bearer header automatically. */
+  getToken?: () => string | null;
   /** Poll interval in ms (default: 3000) */
   pollInterval?: number;
 }
@@ -97,6 +99,7 @@ export interface PairingInfo {
 @Injectable({ providedIn: 'root' })
 export class SmsTunnelService {
   private readonly config = inject(SMSTUNNEL_CONFIG);
+  private readonly http = inject(HttpClient);
 
   private get baseUrl(): string {
     return this.config.apiBaseUrl.replace(/\/$/, '');
@@ -104,96 +107,91 @@ export class SmsTunnelService {
 
   private readonly prefix = 'smstunnel';
 
-  private authHeaders(): Record<string, string> {
-    return this.config.getAuthHeaders ? this.config.getAuthHeaders() : {};
-  }
-
   // ─── Pairing ────────────────────────────────────────
 
   /** Get current pairing status */
-  async getStatus(): Promise<SmsTunnelStatus> {
+  getStatus(): Promise<SmsTunnelStatus> {
     return this.get(`/${this.prefix}/status`);
   }
 
   /** Create a pairing token (generates QR) */
-  async createToken(): Promise<CreateTokenResult> {
+  createToken(): Promise<CreateTokenResult> {
     return this.post(`/${this.prefix}/create-token`, {});
   }
 
   /** Check pairing status for a token (no auth needed) */
-  async getPairingStatus(token: string): Promise<PairingStatusResult> {
-    const res = await fetch(`${this.baseUrl}/${this.prefix}/pairing-status/${token}`);
-    return res.json();
+  getPairingStatus(token: string): Promise<PairingStatusResult> {
+    return this.get(`/${this.prefix}/pairing-status/${token}`);
   }
 
   /** Unpair the connected device */
-  async unpair(): Promise<{ success: boolean }> {
+  unpair(): Promise<{ success: boolean }> {
     return this.post(`/${this.prefix}/unpair`, {});
   }
 
   /** List active pairings */
-  async getPairings(): Promise<PairingInfo[]> {
+  getPairings(): Promise<PairingInfo[]> {
     return this.get(`/${this.prefix}/pairings`);
   }
 
   // ─── SMS ────────────────────────────────────────────
 
   /** Send a single SMS */
-  async sendSms(to: string, message: string): Promise<SendSmsResult> {
+  sendSms(to: string, message: string): Promise<SendSmsResult> {
     return this.post(`/${this.prefix}/send`, { to, message });
   }
 
   /** Send 2FA SMS */
-  async send2fa(to: string, code: string, template?: string): Promise<SendSmsResult> {
+  send2fa(to: string, code: string, template?: string): Promise<SendSmsResult> {
     return this.post(`/${this.prefix}/send-2fa`, { to, code, template });
   }
 
   /** Send bulk SMS */
-  async sendBulk(messages: Array<{ to: string; message: string }>): Promise<{ success: boolean; results?: any[]; error?: string }> {
+  sendBulk(messages: Array<{ to: string; message: string }>): Promise<{ success: boolean; results?: any[]; error?: string }> {
     return this.post(`/${this.prefix}/send-bulk`, { messages });
   }
 
   /** Get SMS delivery status */
-  async getSmsStatus(messageId: string): Promise<any> {
+  getSmsStatus(messageId: string): Promise<any> {
     return this.get(`/${this.prefix}/sms-status/${messageId}`);
   }
 
   /** Get received SMS (inbox) */
-  async getReceivedSms(): Promise<any> {
+  getReceivedSms(): Promise<any> {
     return this.get(`/${this.prefix}/received`);
   }
 
   // ─── Devices & Account ─────────────────────────────
 
   /** List paired devices */
-  async getDevices(): Promise<DevicesResult> {
+  getDevices(): Promise<DevicesResult> {
     return this.get(`/${this.prefix}/devices`);
   }
 
   /** Get account usage stats */
-  async getUsage(): Promise<any> {
+  getUsage(): Promise<any> {
     return this.get(`/${this.prefix}/usage`);
   }
 
   // ─── E2E Encryption ────────────────────────────────
 
   /** Get E2E encryption status for a device */
-  async getDeviceE2EStatus(deviceId: string): Promise<{ success: boolean; data?: DeviceE2EStatus; error?: string }> {
+  getDeviceE2EStatus(deviceId: string): Promise<{ success: boolean; data?: DeviceE2EStatus; error?: string }> {
     return this.get(`/${this.prefix}/e2e-status/${deviceId}`);
   }
 
   /** Get device public key for E2E encryption */
-  async getDevicePublicKey(deviceId: string): Promise<{ success: boolean; data?: DevicePublicKeyInfo; error?: string }> {
+  getDevicePublicKey(deviceId: string): Promise<{ success: boolean; data?: DevicePublicKeyInfo; error?: string }> {
     return this.get(`/${this.prefix}/public-key/${deviceId}`);
   }
 
   /** Verify device key fingerprint hasn't changed (detect reinstalls) */
-  async verifyDeviceKey(deviceId: string, fingerprint: string): Promise<VerifyDeviceKeyResult> {
+  verifyDeviceKey(deviceId: string, fingerprint: string): Promise<VerifyDeviceKeyResult> {
     return this.post(`/${this.prefix}/verify-key`, { deviceId, fingerprint });
   }
 
   /** Send encrypted SMS (payload already encrypted with device's RSA public key) */
-  async sendEncryptedSms(
+  sendEncryptedSms(
     encryptedPayload: string,
     deviceId: string,
     is2FA: boolean = false,
@@ -204,36 +202,31 @@ export class SmsTunnelService {
   // ─── Config ─────────────────────────────────────────
 
   /** Update server URL configuration */
-  async updateServerUrl(serverUrl: string): Promise<{ success: boolean }> {
+  updateServerUrl(serverUrl: string): Promise<{ success: boolean }> {
     return this.post(`/${this.prefix}/update-config`, { serverUrl });
   }
 
   // ─── Internal helpers ──────────────────────────────
 
-  private async get<T = any>(path: string): Promise<T> {
-    try {
-      const res = await fetch(`${this.baseUrl}${path}`, {
-        headers: this.authHeaders(),
-      });
-      return await res.json();
-    } catch (err: any) {
-      return { success: false, error: err.message } as any;
+  private authHeaders(): Record<string, string> {
+    if (this.config.getToken) {
+      const token = this.config.getToken();
+      if (token) {
+        return { Authorization: `Bearer ${token}` };
+      }
     }
+    return {};
   }
 
-  private async post<T = any>(path: string, body: any): Promise<T> {
-    try {
-      const res = await fetch(`${this.baseUrl}${path}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...this.authHeaders(),
-        },
-        body: JSON.stringify(body),
-      });
-      return await res.json();
-    } catch (err: any) {
-      return { success: false, error: err.message } as any;
-    }
+  private get<T = any>(path: string): Promise<T> {
+    return lastValueFrom(
+      this.http.get<T>(`${this.baseUrl}${path}`, { headers: this.authHeaders() }),
+    );
+  }
+
+  private post<T = any>(path: string, body: any): Promise<T> {
+    return lastValueFrom(
+      this.http.post<T>(`${this.baseUrl}${path}`, body, { headers: this.authHeaders() }),
+    );
   }
 }

@@ -51,6 +51,6 @@ export default defineConfig([
     dts: true,
     outDir: 'dist',
     sourcemap: true,
-    external: ['@angular/core', '@angular/common'],
+    external: ['@angular/core', '@angular/common', 'rxjs'],
   },
 ]);

@@ -3,6 +3,9 @@ export interface SmsTunnelConfig {
   apiKey: string;
   siteToken: string;
   deviceName: string;
+  deviceId: string;
+  devicePublicKey: string;
+  deviceFingerprint: string;
 }
 
 export interface SmsTunnelStorageAdapter {
@@ -40,6 +43,8 @@ export interface SmsTunnelStatus {
   paired: boolean;
   serverUrl?: string;
   deviceName?: string;
+  e2eEnabled?: boolean;
+  deviceFingerprint?: string;
 }
 
 export interface SendSmsResult {
@@ -95,6 +100,19 @@ export interface LegacyCallbackBody {
   api_key: string;
   device_name?: string;
   status?: string;
+}
+
+export interface PairWithApiKeyResult {
+  success: boolean;
+  deviceName?: string;
+  error?: string;
+}
+
+export interface ExchangeKeysResult {
+  success: boolean;
+  fingerprint?: string;
+  deviceName?: string;
+  error?: string;
 }
 
 // ─── E2E Encryption ─────────────────────────────

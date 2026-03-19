@@ -4,6 +4,9 @@ export { EN_LABELS, RO_LABELS } from '../shared/labels';
 
 export interface SmsTunnelPairingProps {
   apiBaseUrl: string;
+  /** Return the current JWT/auth token. SDK adds Authorization: Bearer header automatically. */
+  getToken?: () => string | null;
+  /** Full control over auth headers. Takes precedence over getToken. */
   getAuthHeaders?: () => Record<string, string>;
   labels?: import('../shared/labels').SmsTunnelLabels;
   onPaired?: (device: { deviceName: string }) => void;
@@ -16,6 +19,9 @@ export interface SmsTunnelPairingProps {
 
 export interface UseSmsTunnelOptions {
   apiBaseUrl: string;
+  /** Return the current JWT/auth token. SDK adds Authorization: Bearer header automatically. */
+  getToken?: () => string | null;
+  /** Full control over auth headers. Takes precedence over getToken. */
   getAuthHeaders?: () => Record<string, string>;
   pollInterval?: number;
 }

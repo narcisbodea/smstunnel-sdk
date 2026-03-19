@@ -3,6 +3,9 @@ import type { SmsTunnelLabels } from '../shared/labels';
 
 export interface UseSmsTunnelOptions {
   apiBaseUrl: string;
+  /** Return the current JWT/auth token. SDK adds Authorization: Bearer header automatically. */
+  getToken?: () => string | null;
+  /** Full control over auth headers. Takes precedence over getToken. */
   getAuthHeaders?: () => Record<string, string>;
   pollInterval?: number;
 }
@@ -16,6 +19,7 @@ export interface SendSmsResult {
 export function useSmsTunnel(options: UseSmsTunnelOptions) {
   const {
     apiBaseUrl,
+    getToken,
     getAuthHeaders,
     pollInterval = 3000,
   } = options;
@@ -36,7 +40,12 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   function authHeaders(): Record<string, string> {
-    return getAuthHeaders ? getAuthHeaders() : {};
+    if (getAuthHeaders) return getAuthHeaders();
+    if (getToken) {
+      const token = getToken();
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    }
+    return {};
   }
 
   async function fetchStatus() {
