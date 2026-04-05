@@ -26,6 +26,7 @@ export interface SmsTunnelStatusResponse {
 export interface CreateTokenResponse {
   success: boolean;
   token?: string;
+  pairingCode?: string;
   qrData?: string;
   expiresAt?: string;
   pollUrl?: string;

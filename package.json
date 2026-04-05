@@ -1,6 +1,6 @@
 {
   "name": "@narcisbodea/smstunnel-sdk",
-  "version": "1.1.9",
+  "version": "1.2.2",
   "description": "SMSTunnel SDK - Node.js + NestJS + React + Vue + Angular + framework-agnostic client for SMS pairing & E2E encryption",
   "author": "NARBOWEB SRL",
   "license": "MIT",
@@ -93,10 +93,10 @@
     }
   },
   "devDependencies": {
-    "@angular/common": "^17.3.12",
-    "@angular/core": "^17.0.0",
-    "@nestjs/common": "^10.0.0",
-    "@nestjs/core": "^10.0.0",
+    "@angular/common": "^21.0.0",
+    "@angular/core": "^21.0.0",
+    "@nestjs/common": "^11.1.17",
+    "@nestjs/core": "^11.1.17",
     "@types/react": "^18.0.0",
     "react": "^18.0.0",
     "rxjs": "^7.0.0",

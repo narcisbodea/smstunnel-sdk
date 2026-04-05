@@ -89,6 +89,7 @@ export class SmsTunnelService {
       return {
         success: true,
         token: data.token,
+        pairingCode: data.pairingCode,
         qrData: data.qrData,
         expiresAt: data.expiresAt,
         pollUrl: data.pollUrl || `${serverUrl}/api/v1/pairing/${data.token}`,
@@ -150,6 +151,7 @@ export class SmsTunnelService {
       return {
         success: true,
         token: data.activation.token,
+        pairingCode: data.activation.pairingCode,
         qrData: data.activation.qrData,
         expiresAt: data.activation.expiresAt,
         pollUrl: `${serverUrl}/api/v1/pairing/${data.activation.token}`,

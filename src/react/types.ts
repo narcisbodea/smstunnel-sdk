@@ -32,6 +32,7 @@ export interface SmsTunnelState {
   deviceName: string;
   showQr: boolean;
   qrData: string;
+  pairingCode: string;
   generating: boolean;
   polling: boolean;
   error: string;

@@ -382,6 +382,38 @@ export function SmsTunnelPairing({
                 <div style={styles.qrFrame}>
                   <QrCodeCanvas value={tunnel.qrData} size={qrSize} />
                 </div>
+                {tunnel.pairingCode && (
+                  <div style={{
+                    marginTop: '12px',
+                    marginBottom: '12px',
+                    padding: '12px',
+                    backgroundColor: '#f9fafb',
+                    borderRadius: '8px',
+                    border: '1px solid #e5e7eb',
+                    textAlign: 'center',
+                  }}>
+                    <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '6px' }}>
+                      {labels.pairingCodeLabel}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: '28px',
+                        fontWeight: 700,
+                        fontFamily: 'monospace',
+                        letterSpacing: '0.3em',
+                        color: '#111827',
+                        cursor: 'pointer',
+                        userSelect: 'all' as const,
+                      }}
+                      onClick={() => {
+                        navigator.clipboard?.writeText(tunnel.pairingCode);
+                      }}
+                      title="Click to copy"
+                    >
+                      {tunnel.pairingCode}
+                    </div>
+                  </div>
+                )}
                 <div
                   style={{
                     display: 'flex',

@@ -11,6 +11,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
     deviceName: '',
     showQr: false,
     qrData: '',
+    pairingCode: '',
     generating: false,
     polling: false,
     error: '',
@@ -111,6 +112,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
       setState((prev) => ({
         ...prev,
         qrData: data.qrData,
+        pairingCode: data.pairingCode || '',
         showQr: true,
         polling: true,
         generating: false,
@@ -132,6 +134,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
       showQr: false,
       polling: false,
       qrData: '',
+      pairingCode: '',
     }));
   }, []);
 

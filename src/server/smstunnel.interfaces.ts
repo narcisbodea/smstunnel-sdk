@@ -56,6 +56,7 @@ export interface SendSmsResult {
 export interface CreateTokenResult {
   success: boolean;
   token?: string;
+  pairingCode?: string;
   qrData?: string;
   expiresAt?: string;
   pollUrl?: string;
@@ -84,6 +85,7 @@ export interface SaasActivateResult {
     id: string;
     subAccountId: string;
     token: string;
+    pairingCode: string;
     qrData: string;
     expiresAt: string;
   };

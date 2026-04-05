@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.2] - 2026-04-05
+
+### Changed
+- Client: added `updateServerUrl()` method
+- React: added `qrSize` prop to SmsTunnelPairing, new label `pairingCodeLabel` and `pairingCodeCopied`
+- Vue: added E2E methods to useSmsTunnel composable
+- Server: added `displayUrl` to SmsTunnelModuleOptions, `getPairings()` service method
+- Labels: added `pairingCodeLabel` and `pairingCodeCopied` to EN/RO labels
+- Dependencies: updated Angular to v21, NestJS to v11
+
 ## [1.1.2] - 2026-03-10
 
 ### Added — E2E Encryption + Angular + Node.js Standalone

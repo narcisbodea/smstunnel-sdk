@@ -32,6 +32,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
   const deviceName = ref('');
   const showQr = ref(false);
   const qrData = ref('');
+  const pairingCode = ref('');
   const generating = ref(false);
   const polling = ref(false);
   const error = ref('');
@@ -116,6 +117,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
       }
       pairingToken = data.token;
       qrData.value = data.qrData;
+      pairingCode.value = data.pairingCode || '';
       showQr.value = true;
       polling.value = true;
     } catch (err: any) {
@@ -131,6 +133,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
     showQr.value = false;
     polling.value = false;
     qrData.value = '';
+    pairingCode.value = '';
   }
 
   async function unpair() {
@@ -233,6 +236,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
     deviceName,
     showQr,
     qrData,
+    pairingCode,
     generating,
     polling,
     error,

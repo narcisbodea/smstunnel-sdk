@@ -21,6 +21,8 @@ export interface SmsTunnelLabels {
   sendTestButton: string;
   smsSentSuccess: string;
   smsError: string;
+  pairingCodeLabel: string;
+  pairingCodeCopied: string;
 }
 
 export const EN_LABELS: SmsTunnelLabels = {
@@ -46,6 +48,8 @@ export const EN_LABELS: SmsTunnelLabels = {
   sendTestButton: 'Send',
   smsSentSuccess: 'SMS sent successfully!',
   smsError: 'Error',
+  pairingCodeLabel: 'Or enter this code in the app:',
+  pairingCodeCopied: 'Code copied!',
 };
 
 export const RO_LABELS: SmsTunnelLabels = {
@@ -71,4 +75,6 @@ export const RO_LABELS: SmsTunnelLabels = {
   sendTestButton: 'Trimite',
   smsSentSuccess: 'SMS trimis cu succes!',
   smsError: 'Eroare',
+  pairingCodeLabel: 'Sau introdu acest cod in aplicatie:',
+  pairingCodeCopied: 'Cod copiat!',
 };
