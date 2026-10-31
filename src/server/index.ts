@@ -42,3 +42,10 @@ export type {
   E2eHybridEnvelope,
   EncryptPayloadOptions,
 } from '../shared/e2e-crypto';
+export {
+  certificateFingerprint,
+  createCertificate,
+  openCertificate,
+  sealText,
+} from '../shared/sealed-crypto';
+export type { SealedCertificate, SealedCertificateFile } from '../shared/sealed-crypto';

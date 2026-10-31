@@ -59,9 +59,19 @@ const e2eStatus = await client.getDeviceE2EStatus('device-id');
 const publicKey = await client.getDevicePublicKey('device-id');
 const verification = await client.verifyDeviceKey('device-id', 'stored-fingerprint');
 await client.sendEncryptedSms('encrypted-payload', 'device-id', {
+  to: '+14155550123', // keeps the number visible in your Messages page; only the phone reads the words
   is2FA: false,
   expectedFingerprint: 'a1b2c3d4',
 });
+
+// Or in one call: fetches the phone's key, encrypts and sends.
+await client.encryptAndSendSms('+14155550123', 'Your order has shipped.', 'device-id');
+
+// Maximum privacy (Professional and Enterprise plans): the number is sealed too.
+// Make the certificate in your dashboard, or with: npx -p @narcisbodea/smstunnel-sdk smstunnel-make-certificate
+// import { openCertificate } from '@narcisbodea/smstunnel-sdk/node';
+const certificate = openCertificate(readFileSync('smstunnel-certificate.json', 'utf8'), process.env.SMSTUNNEL_CERT_PASSWORD);
+await client.sendSealedSms('+14155550123', 'Your order has shipped.', 'device-id', certificate);
 
 // Unified Pairing v2
 const pairing = await client.createPairingToken({

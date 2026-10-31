@@ -26,6 +26,8 @@ import {
   encryptPayloadV1,
   encryptPayloadV2,
 } from '../shared/e2e-crypto';
+import { sealText } from '../shared/sealed-crypto';
+import type { SealedCertificate } from '../shared/sealed-crypto';
 
 // ─── Options ────────────────────────────────────────
 
@@ -281,11 +283,17 @@ export class SmsTunnelNodeClient {
     };
   }
 
-  /** Send encrypted SMS (payload already encrypted with device RSA public key) */
+  /**
+   * Send encrypted SMS (payload already encrypted with device RSA public key).
+   *
+   * Give `to` as well on every plan: the number stays visible to SMSTunnel, so your Messages page can
+   * show who each text went to, and only the phone can read the words. Leaving it out, and sealed
+   * texts, are Maximum privacy (Professional and Enterprise plans).
+   */
   async sendEncryptedSms(
     encryptedPayload: string,
     deviceId: string,
-    options?: { is2FA?: boolean; expectedFingerprint?: string },
+    options?: { is2FA?: boolean; expectedFingerprint?: string; to?: string },
   ): Promise<SendSmsResponse> {
     // Verify E2E status before sending
     if (options?.expectedFingerprint) {
@@ -299,8 +307,29 @@ export class SmsTunnelNodeClient {
     }
 
     return this.post('/api/v1/sms/send', {
+      ...(options?.to !== undefined ? { to: options.to } : {}),
       encrypted: true,
       encryptedPayload,
+      deviceId,
+      is2FA: options?.is2FA || false,
+    });
+  }
+
+  /**
+   * Maximum privacy: seals the number and the text with your private certificate and sends the packet
+   * without `to`. Only your software and the phone holding the certificate can read either.
+   * Open the certificate once with {@link openCertificate} and keep the result in memory.
+   */
+  async sendSealedSms(
+    to: string,
+    message: string,
+    deviceId: string,
+    certificate: SealedCertificate,
+    options?: { is2FA?: boolean },
+  ): Promise<SendSmsResponse> {
+    return this.post('/api/v1/sms/send', {
+      encrypted: true,
+      encryptedPayload: sealText(certificate, { to, message }),
       deviceId,
       is2FA: options?.is2FA || false,
     });
@@ -318,8 +347,8 @@ export class SmsTunnelNodeClient {
    *
    * @param payload      the SMS payload (object is JSON-stringified) — e.g.
    *                     `{ to, message }`. Strings are passed through as-is.
-   * @param publicKeyPem the device RSA public key in PEM form
-   *                     (see {@link getDevicePublicKey}).
+   * @param publicKeyPem the device RSA public key, in PEM or as the bare base64
+   *                     {@link getDevicePublicKey} returns.
    * @param deviceE2eVersion the device's advertised E2E capability, if known.
    */
   encrypt(
@@ -357,6 +386,7 @@ export class SmsTunnelNodeClient {
     const encryptedPayload = this.encrypt({ to, message }, publicKeyPem, options?.deviceE2eVersion);
 
     return this.sendEncryptedSms(encryptedPayload, deviceId, {
+      to,
       is2FA: options?.is2FA,
       expectedFingerprint: options?.expectedFingerprint,
     });
@@ -493,3 +523,10 @@ export type {
   E2eHybridEnvelope,
   EncryptPayloadOptions,
 } from '../shared/e2e-crypto';
+export {
+  certificateFingerprint,
+  createCertificate,
+  openCertificate,
+  sealText,
+} from '../shared/sealed-crypto';
+export type { SealedCertificate, SealedCertificateFile } from '../shared/sealed-crypto';

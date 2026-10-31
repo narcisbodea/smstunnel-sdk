@@ -46,6 +46,16 @@ export default defineConfig([
     target: 'node18',
   },
   {
+    entry: { 'cli/make-certificate': 'src/cli/make-certificate.ts' },
+    format: ['cjs'],
+    dts: false,
+    outDir: 'dist',
+    sourcemap: false,
+    platform: 'node',
+    target: 'node18',
+    banner: { js: '#!/usr/bin/env node' },
+  },
+  {
     entry: { 'angular/index': 'src/angular/index.ts' },
     format: ['cjs', 'esm'],
     dts: true,

@@ -1,6 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { SMSTUNNEL_OPTIONS } from './smstunnel.constants';
 import { encryptPayload } from '../shared/e2e-crypto';
+import { sealText } from '../shared/sealed-crypto';
+import type { SealedCertificate } from '../shared/sealed-crypto';
 import type {
   SmsTunnelModuleOptions,
   SmsTunnelStatus,
@@ -12,6 +14,17 @@ import type {
   ExchangeKeysResult,
   SaasActivateResult,
 } from './smstunnel.interfaces';
+
+/** The pairing token inside a v2 QR code (base64 of `{ s, t, n, v }`), if that's what it is. */
+function pairingTokenOf(qrData: string | undefined): string | undefined {
+  if (!qrData) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(qrData, 'base64').toString('utf8'));
+    return typeof parsed?.t === 'string' && parsed.t ? parsed.t : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 @Injectable()
 export class SmsTunnelService {
@@ -135,8 +148,11 @@ export class SmsTunnelService {
         return { success: false, error: data.error || 'SaaS activation failed' };
       }
 
-      // Save the activation token as siteToken
-      const configUpdate: Record<string, any> = { siteToken: data.activation.token };
+      // The phone pairs with the token inside the QR code: it is the one the pairing_completed callback
+      // carries and the one pairing status answers to. `activation.token` is only an older reference.
+      const pairingToken = pairingTokenOf(data.activation.qrData) ?? data.activation.token;
+
+      const configUpdate: Record<string, any> = { siteToken: pairingToken };
 
       // If the server returned an API key, save it too
       if (data.apiKey?.key) {
@@ -145,17 +161,15 @@ export class SmsTunnelService {
 
       await this.options.storage.updateConfig(configUpdate);
 
-      this.logger.log(
-        `SaaS pairing token created: ${data.activation.token?.substring(0, 12)}... (isNew: ${data.isNew})`,
-      );
+      this.logger.log(`SaaS pairing token created: ${pairingToken?.substring(0, 12)}... (isNew: ${data.isNew})`);
 
       return {
         success: true,
-        token: data.activation.token,
+        token: pairingToken,
         pairingCode: data.activation.pairingCode,
         qrData: data.activation.qrData,
         expiresAt: data.activation.expiresAt,
-        pollUrl: `${serverUrl}/api/v1/pairing/${data.activation.token}`,
+        pollUrl: `${serverUrl}/api/v1/pairing/${pairingToken}`,
       };
     } catch (err: any) {
       this.logger.error(`SMSTunnel SaaS activate error: ${err.message}`);
@@ -595,16 +609,43 @@ export class SmsTunnelService {
   /**
    * Send encrypted SMS via SMSTunnel API.
    * The payload is encrypted client-side with the device's RSA public key.
+   *
+   * Give `to` as well on every plan: the number stays visible to SMSTunnel and only the phone can read
+   * the words. Leaving it out, and sealed texts, are Maximum privacy (Professional and Enterprise plans).
    */
   async sendEncryptedSms(
     encryptedPayload: string,
     deviceId: string,
     is2FA: boolean = false,
+    to?: string,
   ): Promise<SendSmsResult> {
     return this.apiPost('/api/v1/sms/send', {
+      ...(to !== undefined ? { to } : {}),
       encrypted: true,
       encryptedPayload,
       deviceId,
+      is2FA,
+    });
+  }
+
+  /**
+   * Maximum privacy: seals the number and the text with your private certificate and sends the packet
+   * without `to`. Only your software and the phone holding the certificate can read either.
+   */
+  async sendSealedSms(
+    to: string,
+    message: string,
+    certificate: SealedCertificate,
+    is2FA: boolean = false,
+  ): Promise<SendSmsResult> {
+    const config = await this.options.storage.getConfig();
+    if (!config.deviceId) {
+      return { success: false, error: 'No paired device. Pair and exchange keys first.' };
+    }
+    return this.apiPost('/api/v1/sms/send', {
+      encrypted: true,
+      encryptedPayload: sealText(certificate, { to, message }),
+      deviceId: config.deviceId,
       is2FA,
     });
   }
@@ -659,7 +700,7 @@ export class SmsTunnelService {
       };
     }
 
-    return this.sendEncryptedSms(encryptedPayload, config.deviceId, is2FA);
+    return this.sendEncryptedSms(encryptedPayload, config.deviceId, is2FA, to);
   }
 
   /**

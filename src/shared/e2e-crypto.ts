@@ -52,20 +52,47 @@ export interface E2eHybridEnvelope {
 }
 
 /**
+ * The API and the phones give a device's key as bare base64 (SPKI), while Node wants PEM.
+ * A key already in PEM passes through.
+ */
+export function toPublicKeyPem(key: string): string {
+  const trimmed = key.trim();
+  if (trimmed.includes('-----BEGIN')) return trimmed;
+  const lines = trimmed.replace(/\s+/g, '').match(/.{1,64}/g) ?? [];
+  return `-----BEGIN PUBLIC KEY-----\n${lines.join('\n')}\n-----END PUBLIC KEY-----\n`;
+}
+
+/**
+ * Pads a JSON object so the packet's size doesn't give away how long the text is. The phone ignores
+ * the extra field. Anything that isn't a JSON object passes through.
+ */
+function withPadding(payloadJson: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return payloadJson;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return payloadJson;
+  const pad = ' '.repeat(256 - (Buffer.byteLength(payloadJson) % 256));
+  return JSON.stringify({ ...parsed, pad });
+}
+
+/**
  * v1 (legacy) encryptor — RSA PKCS#1 v1.5 directly over the payload.
  *
  * This is the default format and must NOT change: existing paired devices that
  * only understand v1 rely on it.
  *
  * @param payloadJson  UTF-8 JSON payload (e.g. `{"to":"+40...","message":"..."}`).
- * @param publicKeyPem Device RSA public key in PEM (SPKI / PKCS#1) form.
+ * @param publicKeyPem Device RSA public key, in PEM or as the bare base64 the API returns.
  * @returns base64 transport string.
  * @throws if the payload exceeds the RSA modulus capacity (~245 bytes for RSA-2048).
  */
 export function encryptPayloadV1(payloadJson: string, publicKeyPem: string): string {
   const ciphertext = crypto.publicEncrypt(
     {
-      key: publicKeyPem,
+      key: toPublicKeyPem(publicKeyPem),
       padding: crypto.constants.RSA_PKCS1_PADDING,
     },
     Buffer.from(payloadJson, 'utf8'),
@@ -80,7 +107,7 @@ export function encryptPayloadV1(payloadJson: string, publicKeyPem: string): str
  * Has no practical payload-size limit, so it fixes the v1 ~245-byte ceiling.
  *
  * @param payloadJson  UTF-8 JSON payload.
- * @param publicKeyPem Device RSA public key in PEM form.
+ * @param publicKeyPem Device RSA public key, in PEM or as the bare base64 the API returns.
  * @returns base64( utf8( JSON.stringify(envelope) ) ).
  */
 export function encryptPayloadV2(payloadJson: string, publicKeyPem: string): string {
@@ -95,7 +122,7 @@ export function encryptPayloadV2(payloadJson: string, publicKeyPem: string): str
   // RSA-OAEP wrap of the AES key. Omitting `oaepHash` => SHA-1 (interop default).
   const ek = crypto.publicEncrypt(
     {
-      key: publicKeyPem,
+      key: toPublicKeyPem(publicKeyPem),
       padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
     },
     aesKey,
@@ -149,7 +176,7 @@ export function encryptPayload(
     options.deviceE2eVersion >= 2;
 
   return useV2
-    ? encryptPayloadV2(payloadJson, publicKeyPem)
+    ? encryptPayloadV2(withPadding(payloadJson), publicKeyPem)
     : encryptPayloadV1(payloadJson, publicKeyPem);
 }
 

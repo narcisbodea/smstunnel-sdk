@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.0] - 2026-10-31
+
+- **Fixed:** encrypting failed with the key phones actually report (bare base64 SPKI, `ERR_OSSL_UNSUPPORTED`).
+  `encrypt()` and `encryptAndSendSms()` now take PEM or bare base64.
+- **Fixed:** the Enterprise flow kept the older `activation.token` as `siteToken` and in `pollUrl`, so the phone's
+  `pairing_completed` callback was refused and polling answered 404. It now keeps the token inside the QR code.
+- **Changed:** `encryptAndSendSms()` sends `to` too, so your Messages page shows who a text went to. Only the phone can
+  read the words. `sendEncryptedSms()` takes `to` as an option.
+- **Changed:** format v2 is padded, so the packet's size doesn't give away how long a text is.
+- **New:** Maximum privacy (Professional and Enterprise plans, app 1.0.9 or newer): `openCertificate()`, `sealText()` and
+  `sendSealedSms()`. The number is sealed too, and the key and the password stay on your machine.
+- **New:** `smstunnel-make-certificate`, to make a certificate on your own machine.
+
 ## [2.0.1] - 2026-10-28
 
 Documentation and package metadata only. No code changes; `dist/` is identical to 2.0.0.
