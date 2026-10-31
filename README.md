@@ -2,7 +2,11 @@
 
 SMSTunnel SDK - let your own software send texts through your own Android phone and number. Node.js + NestJS + React + Vue + Angular + framework-agnostic client for QR pairing, sending and E2E encryption.
 
-The phone needs the [SMSTunnel app from Google Play](https://play.google.com/store/apps/details?id=io.smstunnel.app).
+The phone needs the SMSTunnel app from Google Play:
+
+<a href="https://play.google.com/store/apps/details?id=io.smstunnel.app"><img src="https://smstunnel.io/google-play-badge.png" alt="Get it on Google Play" height="56"></a>
+
+**End-to-end encryption, on every plan:** only your phone can read the words. **Maximum privacy, on Professional and Enterprise:** the number is encrypted too, with a private certificate only you hold, and your phone refuses any text not sealed with it. After your phone sends it, a text travels over the mobile network like any other SMS.
 
 | Import path | Scope |
 |---|---|
