@@ -1,7 +1,22 @@
 {
   "name": "@narcisbodea/smstunnel-sdk",
-  "version": "1.2.2",
-  "description": "SMSTunnel SDK - Node.js + NestJS + React + Vue + Angular + framework-agnostic client for SMS pairing & E2E encryption",
+  "version": "2.0.1",
+  "description": "SMSTunnel SDK - send texts from your own software through your own Android phone and number. QR pairing, sending and E2E encryption for Node.js, NestJS, React, Vue and Angular",
+  "keywords": [
+    "smstunnel",
+    "sms",
+    "android-sms",
+    "send-sms-from-computer",
+    "sms-sync",
+    "own-number",
+    "notifications",
+    "qr-pairing",
+    "e2e-encryption",
+    "nestjs",
+    "react",
+    "vue",
+    "angular"
+  ],
   "author": "NARBOWEB SRL",
   "license": "MIT",
   "repository": {
@@ -97,6 +112,7 @@
     "@angular/core": "^21.0.0",
     "@nestjs/common": "^11.1.17",
     "@nestjs/core": "^11.1.17",
+    "@types/node": "^20.19.43",
     "@types/react": "^18.0.0",
     "react": "^18.0.0",
     "rxjs": "^7.0.0",

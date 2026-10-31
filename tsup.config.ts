@@ -7,14 +7,14 @@ export default defineConfig([
     dts: true,
     outDir: 'dist',
     clean: true,
-    sourcemap: true,
+    sourcemap: false,
   },
   {
     entry: { 'server/index': 'src/server/index.ts' },
     format: ['cjs', 'esm'],
     dts: true,
     outDir: 'dist',
-    sourcemap: true,
+    sourcemap: false,
     external: ['@nestjs/common', '@nestjs/core', 'reflect-metadata'],
   },
   {
@@ -22,7 +22,7 @@ export default defineConfig([
     format: ['cjs', 'esm'],
     dts: true,
     outDir: 'dist',
-    sourcemap: true,
+    sourcemap: false,
     external: ['react', 'react-dom'],
     esbuildOptions(options) {
       options.jsx = 'automatic';
@@ -33,7 +33,7 @@ export default defineConfig([
     format: ['cjs', 'esm'],
     dts: true,
     outDir: 'dist',
-    sourcemap: true,
+    sourcemap: false,
     external: ['vue'],
   },
   {
@@ -41,7 +41,7 @@ export default defineConfig([
     format: ['cjs', 'esm'],
     dts: true,
     outDir: 'dist',
-    sourcemap: true,
+    sourcemap: false,
     platform: 'node',
     target: 'node18',
   },
@@ -50,7 +50,7 @@ export default defineConfig([
     format: ['cjs', 'esm'],
     dts: true,
     outDir: 'dist',
-    sourcemap: true,
+    sourcemap: false,
     external: ['@angular/core', '@angular/common', 'rxjs'],
   },
 ]);

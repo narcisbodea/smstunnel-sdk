@@ -1,6 +1,8 @@
 # @narcisbodea/smstunnel-sdk
 
-SMSTunnel SDK - Node.js + NestJS + React + Vue + Angular + framework-agnostic client for SMS pairing & E2E encryption.
+SMSTunnel SDK - let your own software send texts through your own Android phone and number. Node.js + NestJS + React + Vue + Angular + framework-agnostic client for QR pairing, sending and E2E encryption.
+
+The phone needs the [SMSTunnel app from Google Play](https://play.google.com/store/apps/details?id=io.smstunnel.app).
 
 | Import path | Scope |
 |---|---|
@@ -37,14 +39,17 @@ const result = await client.sendSms('+40721123456', 'Hello!');
 // Send 2FA
 await client.send2FaSms('+40721123456', 'Your code is 123456');
 
-// Send bulk SMS
-await client.sendBulkSms(['+40721111111', '+40722222222'], 'Bulk message');
+// Send the same text to several of your recipients (max 100 per request, rate-limited)
+await client.sendBulkSms(['+40721111111', '+40722222222'], 'Hello!');
 
 // Get message status
 const status = await client.getMessageStatus('msg-id');
 
-// Get received SMS (inbox)
-const inbox = await client.getReceivedSms({ limit: 20, page: 1 });
+// Get received SMS (synced from your phone, if you enabled sync).
+// Sync is off by default; only texts that arrive after you turn it on are synced.
+// Needs an API key you explicitly allowed to read received messages;
+// keys issued through QR pairing cannot read them.
+const received = await client.getReceivedSms({ limit: 20, page: 1 });
 
 // List devices
 const devices = await client.getDevices();
@@ -201,16 +206,16 @@ SmsTunnelModule.forRootAsync({
 })
 ```
 
-### Multi-Tenant (Enterprise/SaaS) Mode
+### Enterprise Mode (one app, several organizations)
 
-For **multi-tenant applications** (SaaS platforms, CRMs, ERPs) where each tenant needs their own SMS device:
+If your application is used by several organizations and each organization links its own phone, also pass your Enterprise API key and the organization's ID:
 
 ```typescript
 SmsTunnelModule.forRootAsync({
   useFactory: (settingsModel, tenantService) => ({
     storage: new MongoSmsTunnelStorage(settingsModel),
     callbackBaseUrl: process.env.CALLBACK_URL,
-    displayName: 'My SaaS App',
+    displayName: 'My App',
     enterpriseApiKey: process.env.SMSTUNNEL_ENTERPRISE_API_KEY,
     externalId: tenantService.getCurrentTenantId(),
   }),
@@ -218,14 +223,74 @@ SmsTunnelModule.forRootAsync({
 })
 ```
 
-### 3. Auth Guard Integration
+### 3. Auth (secure-by-default since v1.2.3)
+
+> **Breaking change (v1.2.3):** The module now ships a built-in guard
+> (`SmsTunnelAuthGuard`) that protects **every** route except the three
+> public ones (`callback`, `pairing-status/:token`, the legacy WP callback).
+> If you do **not** provide an auth strategy, all non-public routes are
+> **blocked** (fail-closed) and a warning is logged at startup. Previously
+> routes were open unless you wired up your own guard.
+
+Provide an `authenticate(req)` predicate (recommended) — return `true` to
+allow, `false`/throw to reject:
+
+```typescript
+SmsTunnelModule.forRoot({
+  storage: new MongoSmsTunnelStorage(settingsModel),
+  callbackBaseUrl: 'https://myapp.com/api',
+  displayName: 'My App',
+  // Secure-by-default: protect all non-public routes.
+  authenticate: (req) => {
+    // e.g. validate a session, JWT, API key, etc. on the raw request
+    return Boolean(req.user) || isValidJwt(req.headers['authorization']);
+  },
+})
+```
+
+Or hand the module your own NestJS guard (no-arg constructor or instance):
+
+```typescript
+SmsTunnelModule.forRoot({
+  /* ...storage, callbackBaseUrl... */
+  authGuard: MyJwtAuthGuard, // class implementing CanActivate
+})
+```
+
+The public routes are marked with `@SmsTunnelPublic()` and detected via
+metadata (the `SMSTUNNEL_IS_PUBLIC_KEY` reflector key) — no URL string
+matching.
+
+**Legacy / app-level guard:** if you already protect these routes with your
+own global guard using `SMSTUNNEL_PUBLIC_PATHS`, that still works. To avoid
+double-auth you can pass `authenticate: () => true` so the built-in guard
+defers to your global guard, while keeping the public routes open:
 
 ```typescript
 import { SMSTUNNEL_PUBLIC_PATHS } from '@narcisbodea/smstunnel-sdk/server';
 
-// In your JwtAuthGuard:
+// In your global JwtAuthGuard:
 if (SMSTUNNEL_PUBLIC_PATHS.some(p => request.url.includes(p))) return true;
 ```
+
+### `update-config` / server URL is locked down (SSRF protection, v1.2.3)
+
+`POST /smstunnel/update-config` (and `updateServerUrl()`) no longer accept an
+arbitrary `serverUrl`. By default runtime override is **disabled** — set the
+server URL server-side via the storage adapter. To allow runtime changes,
+opt in explicitly and (optionally) extend the host allowlist:
+
+```typescript
+SmsTunnelModule.forRoot({
+  /* ... */
+  allowServerUrlOverride: true,           // default: false
+  serverUrlAllowlist: ['smstunnel.io'],   // default; https only, no private IPs
+})
+```
+
+Rejected: non-`https`, hosts outside the allowlist, and private/loopback/
+link-local/metadata addresses. Invalid values are **not** persisted and the
+route returns `400`.
 
 ### REST Endpoints
 
@@ -445,9 +510,10 @@ export class SmsPairingComponent {
     // SMS
     await this.sms.sendSms('+40721123456', 'Hello!');
     await this.sms.send2fa('+40721123456', '123456');
-    await this.sms.sendBulk([{ to: '+40721111111', message: 'Hi' }]);
+    await this.sms.sendBulk([{ to: '+40721111111', message: 'Hi' }]); // several recipients, max 100
     const msgStatus = await this.sms.getSmsStatus('msg-id');
-    const inbox = await this.sms.getReceivedSms();
+    // Received SMS need a key you explicitly allowed to read them; QR-pairing keys cannot.
+    const received = await this.sms.getReceivedSms();
 
     // Devices
     const devices = await this.sms.getDevices();
@@ -618,7 +684,7 @@ Custom labels: implement the `SmsTunnelLabels` interface.
 | Path | Exports |
 |------|---------|
 | `@narcisbodea/smstunnel-sdk` | `SmsTunnelClient`, `EN_LABELS`, `RO_LABELS`, types |
-| `@narcisbodea/smstunnel-sdk/server` | `SmsTunnelModule`, `SmsTunnelService`, `SMSTUNNEL_PUBLIC_PATHS` |
+| `@narcisbodea/smstunnel-sdk/server` | `SmsTunnelModule`, `SmsTunnelService`, `SmsTunnelAuthGuard`, `SmsTunnelPublic`, `SMSTUNNEL_PUBLIC_PATHS` |
 | `@narcisbodea/smstunnel-sdk/react` | `SmsTunnelPairing`, `QrCodeCanvas`, `useSmsTunnel` |
 | `@narcisbodea/smstunnel-sdk/vue` | `SmsTunnelPairing`, `QrCodeCanvas`, `useSmsTunnel` |
 | `@narcisbodea/smstunnel-sdk/angular` | `SmsTunnelService`, `provideSmsTunnel`, `SMSTUNNEL_CONFIG` |

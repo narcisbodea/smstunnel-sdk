@@ -21,6 +21,12 @@
  * ```
  */
 
+import {
+  encryptPayload,
+  encryptPayloadV1,
+  encryptPayloadV2,
+} from '../shared/e2e-crypto';
+
 // ─── Options ────────────────────────────────────────
 
 export interface SmsTunnelNodeClientOptions {
@@ -30,6 +36,16 @@ export interface SmsTunnelNodeClientOptions {
   serverUrl?: string;
   /** Request timeout in ms (default: 30000) */
   timeout?: number;
+  /**
+   * Opt-in to the E2E v2 hybrid format (AES-256-GCM + RSA-OAEP) when the SDK
+   * encrypts payloads itself (see `encrypt()` / `encryptAndSendSms()`).
+   *
+   * Default `false` → all SDK-side encryption stays on the v1 (RSA PKCS#1 v1.5)
+   * format. Even when `true`, v2 is only used for a device that advertises
+   * `e2eVersion >= 2`; everything else falls back to v1. Mirrors the backend
+   * `E2E_HYBRID_ENABLED` flag and the WP `smstunnel_e2e_hybrid` option.
+   */
+  e2eHybrid?: boolean;
 }
 
 // ─── Response types ─────────────────────────────────
@@ -167,6 +183,7 @@ export class SmsTunnelNodeClient {
   private readonly apiKey: string;
   private readonly serverUrl: string;
   private readonly timeout: number;
+  private readonly e2eHybrid: boolean;
 
   constructor(options: SmsTunnelNodeClientOptions) {
     if (!options.apiKey) {
@@ -175,6 +192,7 @@ export class SmsTunnelNodeClient {
     this.apiKey = options.apiKey;
     this.serverUrl = (options.serverUrl || 'https://smstunnel.io').replace(/\/$/, '');
     this.timeout = options.timeout || 30000;
+    this.e2eHybrid = options.e2eHybrid === true;
   }
 
   // ─── SMS ────────────────────────────────────────────
@@ -285,6 +303,62 @@ export class SmsTunnelNodeClient {
       encryptedPayload,
       deviceId,
       is2FA: options?.is2FA || false,
+    });
+  }
+
+  /**
+   * Encrypt a payload for a device with its RSA public key, producing the
+   * `encryptedPayload` transport string.
+   *
+   * Format gating: v2 (hybrid) is used ONLY when this client was constructed
+   * with `e2eHybrid: true` AND the device advertises `e2eVersion >= 2`
+   * (`deviceE2eVersion`). Otherwise it falls back to v1 (RSA PKCS#1 v1.5), so
+   * old phones are never sent a format they cannot read. When the device
+   * capability is unknown, v1 is used.
+   *
+   * @param payload      the SMS payload (object is JSON-stringified) — e.g.
+   *                     `{ to, message }`. Strings are passed through as-is.
+   * @param publicKeyPem the device RSA public key in PEM form
+   *                     (see {@link getDevicePublicKey}).
+   * @param deviceE2eVersion the device's advertised E2E capability, if known.
+   */
+  encrypt(
+    payload: string | Record<string, any>,
+    publicKeyPem: string,
+    deviceE2eVersion?: number,
+  ): string {
+    const payloadJson = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    return encryptPayload(payloadJson, publicKeyPem, {
+      e2eHybrid: this.e2eHybrid,
+      deviceE2eVersion,
+    });
+  }
+
+  /**
+   * Convenience: fetch the device public key, encrypt `{ to, message }` with
+   * the gated format, and send it as an encrypted SMS in one call.
+   *
+   * Pass `deviceE2eVersion` if you know the device's advertised capability
+   * (from the backend); without it the call stays on v1 even when
+   * `e2eHybrid` is enabled.
+   */
+  async encryptAndSendSms(
+    to: string,
+    message: string,
+    deviceId: string,
+    options?: { is2FA?: boolean; deviceE2eVersion?: number; expectedFingerprint?: string },
+  ): Promise<SendSmsResponse> {
+    const keyRes = await this.getDevicePublicKey(deviceId);
+    const publicKeyPem = keyRes?.data?.publicKey;
+    if (!publicKeyPem) {
+      return { success: false, error: 'Device has no public key. Enable encryption in the SMSTunnel app.' };
+    }
+
+    const encryptedPayload = this.encrypt({ to, message }, publicKeyPem, options?.deviceE2eVersion);
+
+    return this.sendEncryptedSms(encryptedPayload, deviceId, {
+      is2FA: options?.is2FA,
+      expectedFingerprint: options?.expectedFingerprint,
     });
   }
 
@@ -406,3 +480,16 @@ export class SmsTunnelNodeClient {
     }
   }
 }
+
+// ─── E2E encryptors (re-exported for standalone use) ──────────────────────────
+export {
+  encryptPayload,
+  encryptPayloadV1,
+  encryptPayloadV2,
+  decryptPayload,
+} from '../shared/e2e-crypto';
+export type {
+  E2eVersion,
+  E2eHybridEnvelope,
+  EncryptPayloadOptions,
+} from '../shared/e2e-crypto';

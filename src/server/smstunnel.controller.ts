@@ -6,9 +6,14 @@ import {
   Param,
   Inject,
   Logger,
+  UseGuards,
+  OnModuleInit,
+  BadRequestException,
 } from '@nestjs/common';
 import { SmsTunnelService } from './smstunnel.service';
 import { SMSTUNNEL_OPTIONS } from './smstunnel.constants';
+import { SmsTunnelAuthGuard } from './smstunnel.guard';
+import { SmsTunnelPublic } from './smstunnel.public.decorator';
 import type {
   SmsTunnelModuleOptions,
   PairingCallbackBody,
@@ -16,20 +21,17 @@ import type {
 } from './smstunnel.interfaces';
 
 /**
- * Decorator to mark routes as public (no auth).
- * If you have your own @Public() decorator, the module re-exports
- * SMSTUNNEL_PUBLIC_PATHS so you can exclude them in your guard.
+ * SMSTunnel controller.
+ *
+ * Secure-by-default: every route is protected by the built-in
+ * {@link SmsTunnelAuthGuard} except those marked `@SmsTunnelPublic()`.
+ * Consumers supply their auth strategy via `SmsTunnelModule.forRoot()`
+ * (`authenticate` predicate or `authGuard`). If none is supplied, all
+ * non-public routes are blocked (fail-closed) and a warning is logged.
  */
-function SmsTunnelPublic() {
-  // We use Reflect metadata so consumers can detect public routes
-  return (target: any, key: string, descriptor: PropertyDescriptor) => {
-    Reflect.defineMetadata('isPublic', true, descriptor.value);
-    return descriptor;
-  };
-}
-
+@UseGuards(SmsTunnelAuthGuard)
 @Controller()
-export class SmsTunnelController {
+export class SmsTunnelController implements OnModuleInit {
   private readonly logger = new Logger(SmsTunnelController.name);
   private readonly prefix: string;
 
@@ -39,6 +41,18 @@ export class SmsTunnelController {
     private readonly options: SmsTunnelModuleOptions,
   ) {
     this.prefix = 'smstunnel';
+  }
+
+  onModuleInit(): void {
+    const hasAuth =
+      typeof this.options.authenticate === 'function' ||
+      !!this.options.authGuard;
+    if (!hasAuth) {
+      this.logger.warn(
+        'SMSTunnel: no auth strategy configured - all non-public routes are blocked. ' +
+          'Provide authenticate() in forRoot().',
+      );
+    }
   }
 
   /**
@@ -134,8 +148,13 @@ export class SmsTunnelController {
    */
   @Post('smstunnel/update-config')
   async updateConfig(@Body() body: { serverUrl: string }) {
-    await this.smsTunnelService.updateServerUrl(body.serverUrl);
-    return { success: true };
+    try {
+      await this.smsTunnelService.updateServerUrl(body.serverUrl);
+      return { success: true };
+    } catch (err: any) {
+      // SSRF guard / validation rejection - do not persist, surface a 400.
+      throw new BadRequestException(err?.message || 'Invalid serverUrl');
+    }
   }
 
   // ─── Extended SMS endpoints ────────────────────────

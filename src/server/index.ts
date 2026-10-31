@@ -1,6 +1,11 @@
 export { SmsTunnelModule } from './smstunnel.module';
 export { SmsTunnelService } from './smstunnel.service';
 export { SmsTunnelController } from './smstunnel.controller';
+export { SmsTunnelAuthGuard } from './smstunnel.guard';
+export {
+  SmsTunnelPublic,
+  SMSTUNNEL_IS_PUBLIC_KEY,
+} from './smstunnel.public.decorator';
 export {
   SMSTUNNEL_OPTIONS,
   SMSTUNNEL_PUBLIC_PATHS,
@@ -12,6 +17,7 @@ export type {
   SmsTunnelStorageAdapter,
   SmsTunnelModuleOptions,
   SmsTunnelModuleAsyncOptions,
+  CanActivateLike,
   SmsTunnelStatus,
   SendSmsResult,
   CreateTokenResult,
@@ -23,3 +29,16 @@ export type {
   DevicePublicKeyInfo,
   VerifyDeviceKeyResult,
 } from './smstunnel.interfaces';
+
+// ─── E2E encryptors (Node-only; safe to import server-side) ───────────────────
+export {
+  encryptPayload,
+  encryptPayloadV1,
+  encryptPayloadV2,
+  decryptPayload,
+} from '../shared/e2e-crypto';
+export type {
+  E2eVersion,
+  E2eHybridEnvelope,
+  EncryptPayloadOptions,
+} from '../shared/e2e-crypto';

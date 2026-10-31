@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { SMSTUNNEL_OPTIONS } from './smstunnel.constants';
+import { encryptPayload } from '../shared/e2e-crypto';
 import type {
   SmsTunnelModuleOptions,
   SmsTunnelStatus,
@@ -357,11 +358,118 @@ export class SmsTunnelService {
 
   /**
    * Update server URL in config.
+   *
+   * SSRF-hardened: the supplied URL must be https, must resolve to a host on
+   * the configured allowlist (default: smstunnel.io and subdomains), and must
+   * not point at a private/loopback address. Runtime override is disabled
+   * unless the consumer explicitly opts in via `allowServerUrlOverride`.
+   * On any violation the value is rejected and NOT persisted.
    */
   async updateServerUrl(serverUrl: string): Promise<void> {
-    await this.options.storage.updateConfig({
-      serverUrl: serverUrl.replace(/\/$/, ''),
-    });
+    const validated = this.validateServerUrl(serverUrl);
+    await this.options.storage.updateConfig({ serverUrl: validated });
+  }
+
+  /**
+   * Validate and normalize a server URL supplied at runtime.
+   * Throws if the URL is not allowed. Returns the normalized URL
+   * (no trailing slash) on success.
+   */
+  private validateServerUrl(rawUrl: string): string {
+    if (this.options.allowServerUrlOverride !== true) {
+      throw new Error(
+        'SMSTunnel: runtime serverUrl override is disabled. ' +
+          'Configure the server URL server-side (storage adapter) or set ' +
+          'allowServerUrlOverride: true in SmsTunnelModule.forRoot().',
+      );
+    }
+
+    if (typeof rawUrl !== 'string' || rawUrl.trim() === '') {
+      throw new Error('SMSTunnel: serverUrl is required.');
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl.trim());
+    } catch {
+      throw new Error(`SMSTunnel: invalid serverUrl: ${rawUrl}`);
+    }
+
+    // Only https is ever accepted (prevents downgrade + cleartext key leak).
+    if (parsed.protocol !== 'https:') {
+      throw new Error('SMSTunnel: serverUrl must use https://');
+    }
+
+    const host = parsed.hostname.toLowerCase();
+
+    // Reject private / loopback / link-local / metadata hosts.
+    if (this.isPrivateHost(host)) {
+      throw new Error(
+        `SMSTunnel: serverUrl host is not allowed (private/loopback): ${host}`,
+      );
+    }
+
+    // Host must match the allowlist (exact host or a subdomain of it).
+    const allowlist = (
+      this.options.serverUrlAllowlist && this.options.serverUrlAllowlist.length
+        ? this.options.serverUrlAllowlist
+        : ['smstunnel.io']
+    ).map((h) => h.toLowerCase().replace(/^\.+/, ''));
+
+    const allowed = allowlist.some(
+      (allowedHost) => host === allowedHost || host.endsWith(`.${allowedHost}`),
+    );
+    if (!allowed) {
+      throw new Error(
+        `SMSTunnel: serverUrl host "${host}" is not in the allowlist (${allowlist.join(', ')}).`,
+      );
+    }
+
+    // Normalize: strip trailing slash from the origin + path.
+    return `${parsed.origin}${parsed.pathname}`.replace(/\/$/, '');
+  }
+
+  /**
+   * Returns true for hosts that should never be used as a server URL:
+   * localhost, loopback, RFC1918 / unique-local ranges, link-local and the
+   * cloud metadata address.
+   */
+  private isPrivateHost(host: string): boolean {
+    if (
+      host === 'localhost' ||
+      host === '0.0.0.0' ||
+      host === '::1' ||
+      host === '::' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local')
+    ) {
+      return true;
+    }
+
+    // IPv6 literals may arrive bracket-stripped from URL.hostname.
+    if (host.includes(':')) {
+      // ::1 handled above; treat any other IPv6 literal as private to be safe
+      // (the allowlist is hostname-based, not IP-based).
+      return true;
+    }
+
+    // IPv4 literal?
+    const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (m) {
+      const o = m.slice(1).map((n) => parseInt(n, 10));
+      if (o.some((n) => n > 255)) return true; // malformed -> reject
+      const [a, b] = o;
+      if (a === 10) return true; // 10.0.0.0/8
+      if (a === 127) return true; // loopback
+      if (a === 0) return true; // "this" network
+      if (a === 169 && b === 254) return true; // link-local + metadata 169.254.169.254
+      if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+      if (a === 192 && b === 168) return true; // 192.168.0.0/16
+      if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64.0.0/10
+      return false;
+    }
+
+    return false;
   }
 
   // ─── Extended SMS endpoints ────────────────────────
@@ -466,6 +574,10 @@ export class SmsTunnelService {
         devicePublicKey: device.publicKey,
         deviceFingerprint: device.publicKeyFingerprint,
         deviceName: device.name || config.deviceName,
+        // Capability negotiation: store the device's advertised E2E version so
+        // the encryptor knows whether v2 (hybrid) is safe. Default 1 (v1-only).
+        deviceE2eVersion:
+          typeof device.e2eVersion === 'number' ? device.e2eVersion : 1,
       });
 
       this.logger.log(`E2E keys exchanged. Fingerprint: ${device.publicKeyFingerprint}`);
@@ -495,6 +607,59 @@ export class SmsTunnelService {
       deviceId,
       is2FA,
     });
+  }
+
+  /**
+   * Encrypt a payload with the stored device public key, producing the
+   * `encryptedPayload` transport string.
+   *
+   * Format gating (so old phones never break): the v2 hybrid format is used
+   * ONLY when `forRoot({ e2eHybrid: true })` AND the stored
+   * `deviceE2eVersion >= 2` (advertised by the device during key exchange).
+   * Otherwise it falls back to v1 (RSA PKCS#1 v1.5). If no device public key is
+   * stored yet, returns `null` — call `exchangeKeys()` first.
+   *
+   * @param payload object (JSON-stringified) or pre-serialized JSON string.
+   */
+  async encrypt(payload: string | Record<string, any>): Promise<string | null> {
+    const config = await this.options.storage.getConfig();
+    if (!config.devicePublicKey) {
+      this.logger.warn('encrypt() called but no device public key is stored. Run exchangeKeys() first.');
+      return null;
+    }
+
+    const payloadJson =
+      typeof payload === 'string' ? payload : JSON.stringify(payload);
+
+    return encryptPayload(payloadJson, config.devicePublicKey, {
+      e2eHybrid: this.options.e2eHybrid === true,
+      deviceE2eVersion: config.deviceE2eVersion,
+    });
+  }
+
+  /**
+   * Convenience: encrypt `{ to, message }` with the gated format and send it as
+   * an encrypted SMS in one call. Requires keys to have been exchanged first.
+   */
+  async encryptAndSendSms(
+    to: string,
+    message: string,
+    is2FA: boolean = false,
+  ): Promise<SendSmsResult> {
+    const config = await this.options.storage.getConfig();
+    if (!config.deviceId) {
+      return { success: false, error: 'No paired device. Pair and exchange keys first.' };
+    }
+
+    const encryptedPayload = await this.encrypt({ to, message });
+    if (!encryptedPayload) {
+      return {
+        success: false,
+        error: 'Device has no public key. Enable encryption in the SMSTunnel app and run exchangeKeys().',
+      };
+    }
+
+    return this.sendEncryptedSms(encryptedPayload, config.deviceId, is2FA);
   }
 
   /**
