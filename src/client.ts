@@ -19,6 +19,19 @@ export interface SmsTunnelStatusResponse {
   paired: boolean;
   serverUrl?: string;
   deviceName?: string;
+  /** Keys were exchanged with the phone. */
+  e2eEnabled?: boolean;
+  deviceFingerprint?: string;
+}
+
+/** Added to an answer when SMSTunnel refused the call (the backend passes it through). */
+export interface SmsTunnelFailureFields {
+  /** The HTTP status SMSTunnel answered with: 403 permission or plan, 404 not found, 429 limit. */
+  status?: number;
+  /** A stable code on some failures, e.g. `PERMISSION_REQUIRED`. */
+  code?: string;
+  /** With `PERMISSION_REQUIRED`: the permission the API key lacks, e.g. `sms:inbox`. */
+  permission?: string;
 }
 
 // --- Pairing ---
@@ -44,26 +57,33 @@ export interface PairingStatusResponse {
 
 // --- SMS ---
 
-export interface SendSmsResponse {
+export interface SendSmsResponse extends SmsTunnelFailureFields {
   success: boolean;
   messageId?: string;
+  /** `true` when the phone was offline: it gets the text when it is back. */
   queued?: boolean;
   data?: {
     messageId: string;
     branded: boolean;
-    queued: boolean;
-    remaining: number;
+    queued?: boolean;
+    remaining: { clean: number; total: number | string };
   };
   error?: string;
 }
 
-export interface SmsStatusResponse {
+export interface SmsStatusResponse extends SmsTunnelFailureFields {
   success: boolean;
   data?: {
-    messageId: string;
+    id: string;
+    /** For an encrypted text sent without `to`, the message id in brackets. */
+    phoneNumber: string;
+    /** An unconfirmed text shows here as `failed` with `unconfirmed: true`; `deliveryStatus` has the real state. */
     status: 'sent' | 'pending' | 'failed' | 'delivered';
-    recipient: string;
+    unconfirmed?: boolean;
+    deliveryStatus?: 'sent' | 'pending' | 'failed' | 'delivered' | 'unconfirmed';
     sentAt?: string;
+    deliveredAt?: string;
+    errorMessage?: string | null;
   };
   error?: string;
 }
@@ -73,7 +93,9 @@ export interface SendBulkSmsRequest {
 }
 
 export interface SendBulkSmsResponse {
+  /** `true` only when every text went out. */
   success: boolean;
+  /** One per text, in the order given. */
   results?: Array<{ to: string; messageId?: string; error?: string }>;
   error?: string;
 }
@@ -81,45 +103,72 @@ export interface SendBulkSmsResponse {
 export interface Send2faRequest {
   to: string;
   code: string;
+  /** `{code}` is replaced with the code; without it the code is added at the end. */
   template?: string;
 }
 
-export interface ReceivedSmsResponse {
+export interface ReceivedSmsQuery {
+  limit?: number;
+  page?: number;
+  /** ISO date: only texts received after it. */
+  since?: string;
+  /** Part of the sender's number. */
+  phone?: string;
+  deviceId?: string;
+}
+
+export interface ReceivedSmsResponse extends SmsTunnelFailureFields {
   success: boolean;
-  data?: Array<{
-    from: string;
-    message: string;
-    receivedAt: string;
-  }>;
+  data?: {
+    messages: Array<{
+      id: string;
+      sender: string;
+      /** `null` when the phone sent it encrypted. */
+      message: string | null;
+      isEncrypted: boolean;
+      encryptedPayload?: string;
+      receivedAt: string;
+      subscriptionId?: number;
+      simSlot?: number;
+      deviceId?: string;
+      deviceName?: string;
+    }>;
+    total: number;
+    page: number;
+    limit: number;
+    hasMore: boolean;
+  };
   error?: string;
 }
 
 // --- Devices ---
 
-export interface DevicesResponse {
+export interface DevicesResponse extends SmsTunnelFailureFields {
   success: boolean;
-  data?: Array<{
-    id: string;
-    clientId: string;
-    name: string;
-    brand?: string;
-    model?: string;
-    connected?: boolean;
-  }>;
+  data?: {
+    devices: Array<{
+      id: string;
+      name: string;
+      isOnline: boolean;
+      lastSeenAt?: string;
+    }>;
+    online: number;
+    total: number;
+  };
   error?: string;
 }
 
 // --- Account ---
 
-export interface AccountUsageResponse {
+export interface AccountUsageResponse extends SmsTunnelFailureFields {
   success: boolean;
   data?: {
-    messagesSent: number;
-    messagesReceived: number;
-    messagesSentToday: number;
-    messagesSentMonth: number;
-    dailyLimit?: number;
-    monthlyLimit?: number;
+    plan: string;
+    accountType: string;
+    usage: { smsClean: number; smsBranded: number; twoFaClean: number };
+    limits: { smsClean: number | 'unlimited'; twoFaClean: number | 'unlimited' };
+    remaining: { smsClean: number | 'unlimited'; twoFaClean: number | 'unlimited' };
+    enterprise?: { id: string; name: string };
   };
   error?: string;
 }
@@ -267,7 +316,10 @@ export class SmsTunnelClient {
     return res.json();
   }
 
-  /** List active pairings (proxied through backend) */
+  /**
+   * @deprecated SMSTunnel lists pairings only for a dashboard sign-in, so through the backend's API key this
+   * answers `{ success: false, status: 401 }`, not a list. Use `getStatus()` and `getDevices()`.
+   */
   async getPairings(): Promise<PairingInfo[]> {
     const res = await fetch(`${this.baseUrl}/${this.prefix}/pairings`, {
       headers: this.getAuthHeaders(),
@@ -290,7 +342,7 @@ export class SmsTunnelClient {
     return res.json();
   }
 
-  /** Send a 2FA SMS */
+  /** Send a 2FA SMS. `{code}` in `template` is replaced with the code. */
   async send2fa(to: string, code: string, template?: string): Promise<SendSmsResponse> {
     const res = await fetch(`${this.baseUrl}/${this.prefix}/send-2fa`, {
       method: 'POST',
@@ -303,7 +355,7 @@ export class SmsTunnelClient {
     return res.json();
   }
 
-  /** Send bulk SMS */
+  /** Send texts to several numbers (one result per text, in your order) */
   async sendBulk(messages: Array<{ to: string; message: string }>): Promise<SendBulkSmsResponse> {
     const res = await fetch(`${this.baseUrl}/${this.prefix}/send-bulk`, {
       method: 'POST',
@@ -318,15 +370,24 @@ export class SmsTunnelClient {
 
   /** Get SMS delivery status */
   async getSmsStatus(messageId: string): Promise<SmsStatusResponse> {
-    const res = await fetch(`${this.baseUrl}/${this.prefix}/sms-status/${messageId}`, {
-      headers: this.getAuthHeaders(),
-    });
+    const res = await fetch(
+      `${this.baseUrl}/${this.prefix}/sms-status/${encodeURIComponent(messageId)}`,
+      { headers: this.getAuthHeaders() },
+    );
     return res.json();
   }
 
-  /** Get received SMS (inbox) */
-  async getReceivedSms(): Promise<ReceivedSmsResponse> {
-    const res = await fetch(`${this.baseUrl}/${this.prefix}/received`, {
+  /**
+   * Get received SMS (inbox). The backend's API key must be allowed to read them; otherwise the answer is
+   * `{ success: false, status: 403, code: 'PERMISSION_REQUIRED' }`.
+   */
+  async getReceivedSms(query?: ReceivedSmsQuery): Promise<ReceivedSmsResponse> {
+    const params = new URLSearchParams();
+    for (const [name, value] of Object.entries(query ?? {})) {
+      if (value !== undefined && value !== null && value !== '') params.set(name, String(value));
+    }
+    const qs = params.toString();
+    const res = await fetch(`${this.baseUrl}/${this.prefix}/received${qs ? `?${qs}` : ''}`, {
       headers: this.getAuthHeaders(),
     });
     return res.json();
@@ -355,7 +416,7 @@ export class SmsTunnelClient {
   /** Get E2E encryption status for a device */
   async getDeviceE2EStatus(deviceId: string): Promise<DeviceE2EStatusResponse> {
     const res = await fetch(
-      `${this.baseUrl}/${this.prefix}/e2e-status/${deviceId}`,
+      `${this.baseUrl}/${this.prefix}/e2e-status/${encodeURIComponent(deviceId)}`,
       { headers: this.getAuthHeaders() },
     );
     return res.json();
@@ -364,7 +425,7 @@ export class SmsTunnelClient {
   /** Get device public key for E2E encryption */
   async getDevicePublicKey(deviceId: string): Promise<DevicePublicKeyResponse> {
     const res = await fetch(
-      `${this.baseUrl}/${this.prefix}/public-key/${deviceId}`,
+      `${this.baseUrl}/${this.prefix}/public-key/${encodeURIComponent(deviceId)}`,
       { headers: this.getAuthHeaders() },
     );
     return res.json();
@@ -386,11 +447,17 @@ export class SmsTunnelClient {
     return res.json();
   }
 
-  /** Send an encrypted SMS (payload already encrypted with device public key) */
+  /**
+   * Send an encrypted SMS (payload already encrypted with device public key).
+   *
+   * Give `to` as well on every plan: the number stays visible to SMSTunnel and only the phone reads the
+   * words. Without `to` the text is Maximum privacy, which needs the Professional or Enterprise plan.
+   */
   async sendEncryptedSms(
     encryptedPayload: string,
     deviceId: string,
     is2FA: boolean = false,
+    to?: string,
   ): Promise<SendSmsResponse> {
     const res = await fetch(`${this.baseUrl}/${this.prefix}/send-encrypted`, {
       method: 'POST',
@@ -398,7 +465,7 @@ export class SmsTunnelClient {
         'Content-Type': 'application/json',
         ...this.getAuthHeaders(),
       },
-      body: JSON.stringify({ encryptedPayload, deviceId, is2FA }),
+      body: JSON.stringify({ encryptedPayload, deviceId, is2FA, ...(to !== undefined ? { to } : {}) }),
     });
     return res.json();
   }

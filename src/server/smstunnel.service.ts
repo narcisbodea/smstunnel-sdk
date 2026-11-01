@@ -3,27 +3,37 @@ import { SMSTUNNEL_OPTIONS } from './smstunnel.constants';
 import { encryptPayload } from '../shared/e2e-crypto';
 import { sealText } from '../shared/sealed-crypto';
 import type { SealedCertificate } from '../shared/sealed-crypto';
+import { failureOf, readBody } from '../shared/api-error';
+import { pairingTokenOf } from '../shared/pairing-token';
 import type {
   SmsTunnelModuleOptions,
   SmsTunnelStatus,
   SendSmsResult,
+  SendBulkResult,
   CreateTokenResult,
   PairingStatusResult,
   PairingCallbackBody,
   PairWithApiKeyResult,
   ExchangeKeysResult,
   SaasActivateResult,
+  DeviceE2EStatus,
+  DevicePublicKeyInfo,
+  VerifyDeviceKeyResult,
+  EnterpriseClientStatusResult,
+  ReceivedSmsQuery,
 } from './smstunnel.interfaces';
 
-/** The pairing token inside a v2 QR code (base64 of `{ s, t, n, v }`), if that's what it is. */
-function pairingTokenOf(qrData: string | undefined): string | undefined {
-  if (!qrData) return undefined;
-  try {
-    const parsed = JSON.parse(Buffer.from(qrData, 'base64').toString('utf8'));
-    return typeof parsed?.t === 'string' && parsed.t ? parsed.t : undefined;
-  } catch {
-    return undefined;
-  }
+/** The phones in a `GET /api/v1/devices` answer, which is `{ success, data: { devices, online, total } }`. */
+function devicesOf(answer: any): any[] {
+  const devices = answer?.data?.devices ?? answer?.devices;
+  return Array.isArray(devices) ? devices : [];
+}
+
+/** The 2FA text: `template` with `{code}` replaced, the template followed by the code, or a default. */
+function twoFaText(code: string, template?: string): string {
+  if (!template) return `Your verification code: ${code}`;
+  if (template.includes('{code}')) return template.split('{code}').join(code);
+  return code && !template.includes(code) ? `${template} ${code}` : template;
 }
 
 @Injectable()
@@ -89,9 +99,14 @@ export class SmsTunnelService {
       });
 
       if (!res.ok) {
-        const errText = await res.text();
-        this.logger.warn(`SMSTunnel create token failed: ${res.status} ${errText}`);
-        return { success: false, error: `SMSTunnel returned error: ${res.status}` };
+        const body: any = await readBody(res);
+        this.logger.warn(`SMSTunnel create token failed: ${res.status} ${JSON.stringify(body)}`);
+        return {
+          success: false,
+          error: `SMSTunnel returned error: ${res.status}`,
+          status: res.status,
+          ...(typeof body?.code === 'string' ? { code: body.code } : {}),
+        };
       }
 
       const data: any = await res.json();
@@ -137,9 +152,15 @@ export class SmsTunnelService {
       });
 
       if (!res.ok) {
-        const errText = await res.text();
-        this.logger.warn(`SMSTunnel SaaS activate failed: ${res.status} ${errText}`);
-        return { success: false, error: `SMSTunnel returned error: ${res.status}` };
+        // 409 with code CONCURRENT_ACTIVATION or ALREADY_CONNECTED: another call for this externalId won.
+        const body: any = await readBody(res);
+        this.logger.warn(`SMSTunnel SaaS activate failed: ${res.status} ${JSON.stringify(body)}`);
+        return {
+          success: false,
+          error: `SMSTunnel returned error: ${res.status}`,
+          status: res.status,
+          ...(typeof body?.code === 'string' ? { code: body.code } : {}),
+        };
       }
 
       const data: SaasActivateResult = await res.json();
@@ -287,11 +308,9 @@ export class SmsTunnelService {
         return { success: false, error: `SMSTunnel returned error: ${res.status}` };
       }
 
-      const data: any = await res.json();
-      const devices = data?.devices || [];
-      const device = devices[0];
+      const device = devicesOf(await res.json())[0];
       const deviceName = device?.name || 'Android Phone';
-      const deviceId = device?.id || device?._id;
+      const deviceId = device?.id || device?._id ? String(device.id || device._id) : undefined;
 
       const update: Record<string, any> = { apiKey, deviceName };
       if (deviceId) update.deviceId = deviceId;
@@ -345,17 +364,18 @@ export class SmsTunnelService {
         body: JSON.stringify({ to, message }),
       });
 
-      const data: any = await res.json();
+      const data: any = await readBody(res);
 
-      if (data.success) {
-        this.logger.log(`SMS sent via SMSTunnel: ${data.messageId} -> ${to}`);
-        return { success: true, messageId: data.messageId };
+      if (res.ok && data?.success) {
+        this.logger.log(`SMS sent via SMSTunnel: ${data.messageId}`);
+        return {
+          success: true,
+          messageId: data.messageId,
+          ...(data.queued ? { queued: true } : {}),
+        };
       }
 
-      return {
-        success: false,
-        error: data.error || data.message || 'SMSTunnel returned an error',
-      };
+      return failureOf(res.status, data);
     } catch (err: any) {
       this.logger.error(`SMS send error: ${err.message}`);
       return { success: false, error: `Could not send SMS: ${err.message}` };
@@ -489,33 +509,88 @@ export class SmsTunnelService {
   // ─── Extended SMS endpoints ────────────────────────
 
   /**
-   * Send 2FA SMS via SMSTunnel API.
+   * Send a 2FA text via SMSTunnel API (counts against the 2FA quota).
+   *
+   * The text is `template` with `{code}` replaced (e.g. `'Shop: {code} is your code'`), the template followed
+   * by the code when it has no `{code}`, or `Your verification code: <code>` without a template. SMSTunnel
+   * refuses a 2FA text that contains no code.
    */
   async send2fa(to: string, code: string, template?: string): Promise<SendSmsResult> {
-    return this.apiPost('/api/v1/sms/send-2fa', { to, code, template });
+    return this.apiPost('/api/v1/sms/send-2fa', { to, message: twoFaText(code, template) });
   }
 
   /**
-   * Send bulk SMS via SMSTunnel API.
+   * Send texts to several numbers. SMSTunnel takes one text for up to 100 numbers per request, so the texts
+   * are grouped by wording: one request per distinct text (and per 100 numbers). Requests are rate-limited
+   * (30 a minute), so many different wordings are better sent one by one with `sendSms`. The phone has to be
+   * online.
+   *
+   * @param messages `[{ to, message }]`, or the numbers when `message` is given.
+   * @returns one result per text, in your order, with its `messageId` or `error`.
    */
   async sendBulk(
-    messages: Array<{ to: string; message: string }>,
-  ): Promise<{ success: boolean; results?: any[]; error?: string }> {
-    return this.apiPost('/api/v1/sms/send-bulk', { messages });
+    messages: Array<{ to: string; message: string }> | string[],
+    message?: string,
+  ): Promise<SendBulkResult> {
+    const texts = (Array.isArray(messages) ? messages : []).map((item: any) =>
+      typeof item === 'string' ? { to: item, message: message ?? '' } : { to: item?.to, message: item?.message },
+    );
+    if (texts.length === 0) {
+      return { success: false, results: [], error: 'No texts to send.' };
+    }
+
+    const results: SendBulkResult['results'] = texts.map((text) => ({ to: text.to }));
+    const byWording = new Map<string, number[]>();
+    texts.forEach((text, index) => {
+      byWording.set(text.message, [...(byWording.get(text.message) ?? []), index]);
+    });
+
+    for (const [wording, indexes] of byWording) {
+      for (let start = 0; start < indexes.length; start += 100) {
+        const chunk = indexes.slice(start, start + 100);
+        const res = await this.apiPost('/api/v1/sms/send-bulk', {
+          to: chunk.map((index) => texts[index].to),
+          message: wording,
+        });
+        const ids: unknown = res?.data?.messageIds;
+        if (res?.success && Array.isArray(ids) && ids.length === chunk.length) {
+          chunk.forEach((index, position) => (results[index].messageId = String(ids[position])));
+        } else {
+          chunk.forEach((index) => (results[index].error = res?.error || 'SMSTunnel returned an error'));
+        }
+      }
+    }
+
+    const failed = results.filter((result) => result.error).length;
+    if (failed === 0) return { success: true, results };
+    return {
+      success: false,
+      results,
+      error: failed === results.length ? results[0].error! : `${failed} of ${results.length} texts were not sent.`,
+    };
   }
 
   /**
-   * Get SMS delivery status.
+   * Get SMS delivery status (needs `sms:read`). `data.deliveryStatus` has the real state; an unconfirmed
+   * text shows as `status: 'failed'` with `unconfirmed: true`.
    */
   async getSmsStatus(messageId: string): Promise<any> {
-    return this.apiGet(`/api/v1/sms/status/${messageId}`);
+    return this.apiGet(`/api/v1/sms/status/${encodeURIComponent(messageId)}`);
   }
 
   /**
-   * Get received SMS (inbox).
+   * Get received SMS (inbox). Needs a key allowed to read received texts: keys made by QR pairing never are,
+   * so this usually answers `{ success: false, status: 403, code: 'PERMISSION_REQUIRED' }` unless you paired
+   * with such a key through `pairWithApiKey()`.
    */
-  async getReceivedSms(): Promise<any> {
-    return this.apiGet('/api/v1/sms/received');
+  async getReceivedSms(query?: ReceivedSmsQuery): Promise<any> {
+    const params = new URLSearchParams();
+    for (const name of ['limit', 'page', 'since', 'phone', 'deviceId'] as const) {
+      const value = query?.[name];
+      if (value !== undefined && value !== null && value !== '') params.set(name, String(value));
+    }
+    const qs = params.toString();
+    return this.apiGet(`/api/v1/sms/received${qs ? `?${qs}` : ''}`);
   }
 
   // ─── Devices & Account ─────────────────────────────
@@ -547,63 +622,89 @@ export class SmsTunnelService {
       return { success: false, error: 'SMSTunnel is not configured.' };
     }
 
-    const serverUrl = config.serverUrl.replace(/\/$/, '');
-
     try {
-      // Resolve deviceId if we don't have it
-      let deviceId = config.deviceId;
-      if (!deviceId) {
-        const listRes = await fetch(`${serverUrl}/api/v1/devices`, {
-          headers: { 'X-API-Key': config.apiKey },
-        });
-        if (!listRes.ok) {
-          return { success: false, error: `Could not list devices: ${listRes.status}` };
-        }
-        const listData: any = await listRes.json();
-        const devices = listData?.devices || [];
-        if (devices.length === 0) {
-          return { success: false, error: 'No paired device found.' };
-        }
-        deviceId = devices[0].id || devices[0]._id;
-        await this.options.storage.updateConfig({ deviceId });
+      const resolved = await this.resolveDeviceId();
+      if (!resolved.deviceId) {
+        return { success: false, error: resolved.error || 'No paired device found.' };
       }
+      const deviceId = resolved.deviceId;
+      const path = `/api/v1/devices/${encodeURIComponent(deviceId)}`;
 
-      // Fetch device detail (includes publicKey)
-      const res = await fetch(`${serverUrl}/api/v1/devices/${deviceId}`, {
-        headers: { 'X-API-Key': config.apiKey },
-      });
-
-      if (!res.ok) {
-        return { success: false, error: `Could not fetch device: ${res.status}` };
+      // The key, then its fingerprint. SMSTunnel answers 400 for a phone without encryption.
+      const key = await this.apiGet(`${path}/public-key`);
+      if (!key?.success || !key.data?.publicKey) {
+        return {
+          success: false,
+          error:
+            key?.status === 400
+              ? 'Device has no public key. Enable encryption in SMSTunnel app on the phone.'
+              : `Could not fetch the device key: ${key?.error || 'no key'}`,
+        };
       }
+      const status = await this.apiGet(`${path}/e2e-status`);
+      const fingerprint: string | undefined = status?.data?.publicKeyFingerprint;
 
-      const device: any = await res.json();
-
-      if (!device.publicKey) {
-        return { success: false, error: 'Device has no public key. Enable encryption in SMSTunnel app on the phone.' };
-      }
-
+      // Capability negotiation: v2 (hybrid) only for a phone that reports reading it. The API-key routes don't
+      // report it yet, so a version is kept only when one is reported; otherwise 1 (v1-only), the safe default.
+      const reported = status?.data?.e2eVersion ?? key.data.e2eVersion;
       await this.options.storage.updateConfig({
         deviceId,
-        devicePublicKey: device.publicKey,
-        deviceFingerprint: device.publicKeyFingerprint,
-        deviceName: device.name || config.deviceName,
-        // Capability negotiation: store the device's advertised E2E version so
-        // the encryptor knows whether v2 (hybrid) is safe. Default 1 (v1-only).
-        deviceE2eVersion:
-          typeof device.e2eVersion === 'number' ? device.e2eVersion : 1,
+        devicePublicKey: key.data.publicKey,
+        ...(fingerprint ? { deviceFingerprint: fingerprint } : {}),
+        deviceName: key.data.deviceName || config.deviceName,
+        deviceE2eVersion: typeof reported === 'number' ? reported : config.deviceE2eVersion ?? 1,
       });
 
-      this.logger.log(`E2E keys exchanged. Fingerprint: ${device.publicKeyFingerprint}`);
+      this.logger.log(`E2E keys exchanged. Fingerprint: ${fingerprint}`);
       return {
         success: true,
-        fingerprint: device.publicKeyFingerprint,
-        deviceName: device.name,
+        fingerprint,
+        deviceName: key.data.deviceName,
       };
     } catch (err: any) {
       this.logger.error(`Key exchange error: ${err.message}`);
       return { success: false, error: `Key exchange failed: ${err.message}` };
     }
+  }
+
+  /**
+   * Get E2E encryption status for a device (the paired one when `deviceId` is left out).
+   */
+  async getDeviceE2EStatus(
+    deviceId?: string,
+  ): Promise<{ success: boolean; data?: DeviceE2EStatus; error?: string }> {
+    const id = deviceId || (await this.options.storage.getConfig()).deviceId;
+    if (!id) return { success: false, error: 'No paired device.' };
+    return this.apiGet(`/api/v1/devices/${encodeURIComponent(id)}/e2e-status`);
+  }
+
+  /**
+   * Get a device's public key for E2E encryption (the paired one when `deviceId` is left out).
+   */
+  async getDevicePublicKey(
+    deviceId?: string,
+  ): Promise<{ success: boolean; data?: DevicePublicKeyInfo; error?: string }> {
+    const id = deviceId || (await this.options.storage.getConfig()).deviceId;
+    if (!id) return { success: false, error: 'No paired device.' };
+    return this.apiGet(`/api/v1/devices/${encodeURIComponent(id)}/public-key`);
+  }
+
+  /**
+   * Verify that a stored fingerprint matches the device's current key. A different one means the app was
+   * reinstalled and the phone has to be paired again.
+   */
+  async verifyDeviceKey(deviceId: string, storedFingerprint: string): Promise<VerifyDeviceKeyResult> {
+    const res = await this.getDeviceE2EStatus(deviceId);
+    const status = res.success ? res.data : undefined;
+    if (!status?.hasPublicKey || !status.publicKeyFingerprint) {
+      return { valid: false, needsRePairing: true };
+    }
+    const matches = status.publicKeyFingerprint === storedFingerprint;
+    return {
+      valid: matches,
+      currentFingerprint: status.publicKeyFingerprint,
+      needsRePairing: !matches,
+    };
   }
 
   /**
@@ -638,14 +739,14 @@ export class SmsTunnelService {
     certificate: SealedCertificate,
     is2FA: boolean = false,
   ): Promise<SendSmsResult> {
-    const config = await this.options.storage.getConfig();
-    if (!config.deviceId) {
+    const { deviceId } = await this.resolveDeviceId();
+    if (!deviceId) {
       return { success: false, error: 'No paired device. Pair and exchange keys first.' };
     }
     return this.apiPost('/api/v1/sms/send', {
       encrypted: true,
       encryptedPayload: sealText(certificate, { to, message }),
-      deviceId: config.deviceId,
+      deviceId,
       is2FA,
     });
   }
@@ -680,14 +781,18 @@ export class SmsTunnelService {
 
   /**
    * Convenience: encrypt `{ to, message }` with the gated format and send it as
-   * an encrypted SMS in one call. Requires keys to have been exchanged first.
+   * an encrypted SMS in one call. Exchanges keys first when none are stored yet.
    */
   async encryptAndSendSms(
     to: string,
     message: string,
     is2FA: boolean = false,
   ): Promise<SendSmsResult> {
-    const config = await this.options.storage.getConfig();
+    let config = await this.options.storage.getConfig();
+    if (config.apiKey && (!config.deviceId || !config.devicePublicKey)) {
+      await this.exchangeKeys();
+      config = await this.options.storage.getConfig();
+    }
     if (!config.deviceId) {
       return { success: false, error: 'No paired device. Pair and exchange keys first.' };
     }
@@ -704,13 +809,50 @@ export class SmsTunnelService {
   }
 
   /**
-   * List pairings for the authenticated user.
+   * @deprecated SMSTunnel lists pairings only for a dashboard sign-in, so with the stored API key this answers
+   * `{ success: false, status: 401 }`. `getStatus()` tells whether this app is paired, `getDevices()` which
+   * phones it can use.
    */
   async getPairings(): Promise<any> {
     return this.apiGet('/api/v1/pairings');
   }
 
+  // ─── Enterprise ────────────────────────────────────
+
+  /**
+   * Enterprise mode: whether the client's phone has linked, and whether it is online.
+   * Uses `enterpriseApiKey` and the configured `externalId` (or the one given).
+   *
+   * @returns `activation` is missing when the client has no pending or linked activation.
+   */
+  async getEnterpriseClientStatus(externalId?: string): Promise<EnterpriseClientStatusResult> {
+    const id = externalId || this.options.externalId;
+    if (!this.options.enterpriseApiKey || !id) {
+      return { success: false, error: 'Enterprise mode needs enterpriseApiKey and externalId.' };
+    }
+    const config = await this.options.storage.getConfig();
+    if (!config.serverUrl) {
+      return { success: false, error: 'SMSTunnel server URL is not configured.' };
+    }
+    return this.request(config.serverUrl, this.options.enterpriseApiKey, 'GET', `/api/v1/saas/client/${encodeURIComponent(id)}`);
+  }
+
   // ─── Internal helpers ──────────────────────────────
+
+  /** The stored phone, or the first phone of the key's account (then stored). */
+  private async resolveDeviceId(): Promise<{ deviceId?: string; error?: string }> {
+    const config = await this.options.storage.getConfig();
+    if (config.deviceId) return { deviceId: config.deviceId };
+    const list = await this.apiGet('/api/v1/devices');
+    if (!list?.success) {
+      return { error: `Could not list devices: ${list?.status ?? ''} ${list?.error ?? ''}`.trim() };
+    }
+    const first = devicesOf(list)[0];
+    const deviceId = first?.id || first?._id ? String(first.id || first._id) : undefined;
+    if (!deviceId) return { error: 'No paired device found.' };
+    await this.options.storage.updateConfig({ deviceId });
+    return { deviceId };
+  }
 
   /** Make an authenticated GET request to SMSTunnel */
   private async apiGet(path: string): Promise<any> {
@@ -718,15 +860,7 @@ export class SmsTunnelService {
     if (!config.apiKey || !config.serverUrl) {
       return { success: false, error: 'SMSTunnel is not configured.' };
     }
-    const serverUrl = config.serverUrl.replace(/\/$/, '');
-    try {
-      const res = await fetch(`${serverUrl}${path}`, {
-        headers: { 'X-API-Key': config.apiKey },
-      });
-      return await res.json();
-    } catch (err: any) {
-      return { success: false, error: err.message };
-    }
+    return this.request(config.serverUrl, config.apiKey, 'GET', path);
   }
 
   /** Make an authenticated POST request to SMSTunnel */
@@ -735,17 +869,34 @@ export class SmsTunnelService {
     if (!config.apiKey || !config.serverUrl) {
       return { success: false, error: 'SMSTunnel is not configured.' };
     }
-    const serverUrl = config.serverUrl.replace(/\/$/, '');
+    return this.request(config.serverUrl, config.apiKey, 'POST', path, body);
+  }
+
+  /**
+   * SMSTunnel's answer as it is when it succeeds. When it doesn't: its body plus `success: false`, the HTTP
+   * `status`, and `error` in words, e.g. `{ success: false, status: 403, code: 'PERMISSION_REQUIRED', error }`.
+   */
+  private async request(
+    serverUrl: string,
+    apiKey: string,
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+  ): Promise<any> {
     try {
-      const res = await fetch(`${serverUrl}${path}`, {
-        method: 'POST',
+      const res = await fetch(`${serverUrl.replace(/\/$/, '')}${path}`, {
+        method,
         headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': config.apiKey,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          'X-API-Key': apiKey,
         },
-        body: JSON.stringify(body),
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       });
-      return await res.json();
+      const data = await readBody(res);
+      if (!res.ok || !data || typeof data !== 'object') {
+        return failureOf(res.status, data);
+      }
+      return data;
     } catch (err: any) {
       return { success: false, error: err.message };
     }

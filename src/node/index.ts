@@ -19,6 +19,9 @@
  * // E2E: check status, get public key, send encrypted
  * const e2e = await client.getDeviceE2EStatus('device-id');
  * ```
+ *
+ * Every method throws {@link SmsTunnelApiError} when SMSTunnel answers with an error status; it carries the
+ * HTTP `status`, the `code` (e.g. `PERMISSION_REQUIRED`) and the body.
  */
 
 import {
@@ -28,6 +31,8 @@ import {
 } from '../shared/e2e-crypto';
 import { sealText } from '../shared/sealed-crypto';
 import type { SealedCertificate } from '../shared/sealed-crypto';
+import { SmsTunnelApiError, readBody } from '../shared/api-error';
+import { pairingTokenOf } from '../shared/pairing-token';
 
 // ─── Options ────────────────────────────────────────
 
@@ -50,11 +55,18 @@ export interface SmsTunnelNodeClientOptions {
   e2eHybrid?: boolean;
 }
 
+/** Options for a plain text. */
+export interface SendOptions {
+  /** Used for a number without `+` or `00`, e.g. `+40`. The phone's own setting wins when it has one. */
+  defaultCountryCode?: string;
+}
+
 // ─── Response types ─────────────────────────────────
 
 export interface SendSmsResponse {
   success: boolean;
   messageId?: string;
+  /** `true` when the phone was offline: it gets the text when it is back. */
   queued?: boolean;
   data?: {
     messageId: string;
@@ -68,6 +80,7 @@ export interface SendSmsResponse {
 export interface SendBulkSmsResponse {
   success: boolean;
   data?: {
+    /** In the order of the numbers you gave. */
     messageIds: string[];
     branded: boolean;
     count: number;
@@ -76,12 +89,19 @@ export interface SendBulkSmsResponse {
   error?: string;
 }
 
+/** Where a text is now. `unconfirmed`: handed to the SIM, but the phone got no confirmation (final, never retried). */
+export type MessageDeliveryStatus = 'pending' | 'sent' | 'delivered' | 'failed' | 'unconfirmed';
+
 export interface MessageStatusResponse {
   success: boolean;
   data?: {
     id: string;
+    /** For an encrypted text sent without `to`, the message id in brackets. */
     phoneNumber: string;
+    /** An unconfirmed text shows here as `failed` with `unconfirmed: true`; `deliveryStatus` has the real state. */
     status: 'pending' | 'sent' | 'delivered' | 'failed';
+    unconfirmed?: boolean;
+    deliveryStatus?: MessageDeliveryStatus;
     sentAt?: string;
     deliveredAt?: string;
     errorMessage?: string | null;
@@ -89,39 +109,69 @@ export interface MessageStatusResponse {
   error?: string;
 }
 
+export interface DeviceSummary {
+  id: string;
+  name: string;
+  isOnline: boolean;
+  lastSeenAt?: string;
+  /** @deprecated Never sent by the server; the SDK fills it from `lastSeenAt`. Use `lastSeenAt`. */
+  lastSeen?: string;
+}
+
 export interface DevicesResponse {
   success: boolean;
   data?: {
-    devices: Array<{
-      id: string;
-      name: string;
-      isOnline: boolean;
-      lastSeen?: string;
-    }>;
+    devices: DeviceSummary[];
     online: number;
     total: number;
   };
   error?: string;
 }
 
+/** Usage counted for today. A client of a company account shares the company's quota and sees it here. */
+export interface AccountUsage {
+  plan: string;
+  accountType: string;
+  usage: { smsClean: number; smsBranded: number; twoFaClean: number };
+  limits: { smsClean: number | 'unlimited'; twoFaClean: number | 'unlimited' };
+  remaining: { smsClean: number | 'unlimited'; twoFaClean: number | 'unlimited' };
+  /** Present for a client of a company account. */
+  enterprise?: { id: string; name: string };
+}
+
 export interface AccountUsageResponse {
   success: boolean;
-  data?: Record<string, any>;
+  data?: AccountUsage & Record<string, any>;
   error?: string;
+}
+
+export interface ReceivedSms {
+  id: string;
+  /** The number that sent it. */
+  sender: string;
+  /** `null` when the phone sent it encrypted (see `encryptedPayload`). */
+  message: string | null;
+  isEncrypted: boolean;
+  encryptedPayload?: string;
+  receivedAt: string;
+  subscriptionId?: number;
+  simSlot?: number;
+  deviceId?: string;
+  deviceName?: string;
+  /** @deprecated Never sent by the server; the SDK fills it from `sender`. Use `sender`. */
+  from: string;
+  /** @deprecated Never sent by the server; the SDK fills it from `message`. Use `message`. */
+  body: string | null;
 }
 
 export interface ReceivedSmsResponse {
   success: boolean;
   data?: {
-    messages: Array<{
-      id: string;
-      from: string;
-      body: string;
-      receivedAt: string;
-      deviceId: string;
-    }>;
+    messages: ReceivedSms[];
     total: number;
     page: number;
+    limit: number;
+    hasMore: boolean;
   };
   error?: string;
 }
@@ -167,6 +217,8 @@ export interface E2EPairingStatusResponse {
     publicKeyFingerprint?: string;
     deviceId?: string;
     deviceName?: string;
+    /** The formats the phone reads: `2` means it reads the hybrid format. Pass it to `encrypt()`. */
+    e2eVersion?: number;
   };
   error?: string;
 }
@@ -177,6 +229,77 @@ export interface PairingTokenStatusResponse {
   displayName?: string;
   pairedDeviceId?: string;
   pairingId?: string;
+}
+
+/** A QR code (and a code to type) for a phone to link to your software. */
+export interface PublicPairingTokenResponse {
+  token: string;
+  /** The same link as a code the user can type in the app. */
+  pairingCode: string;
+  /** Show this as the QR code. */
+  qrData: string;
+  qrDataRaw: { s: string; t: string; n: string; v: number };
+  expiresAt: string;
+  /** `GET` it (no key needed) to see whether the phone has linked. */
+  pollUrl: string;
+}
+
+// ─── Enterprise types ───────────────────────────────
+
+export type EnterpriseActivationState = 'pending' | 'connected' | 'expired' | 'cancelled';
+
+export interface EnterpriseActivateParams {
+  /** Your client's name, shown in the app and in your dashboard. */
+  clientName: string;
+  /** Your own id for this client. Calling again with the same id replaces its earlier activation. */
+  externalId: string;
+  /** https URL on a public host that gets `pairing_completed` (with the client's API key) when the phone links. */
+  callbackUrl?: string;
+  userEmail?: string;
+  userName?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface EnterpriseActivateResponse {
+  success: boolean;
+  isNew: boolean;
+  activation: {
+    id: string;
+    subAccountId: string;
+    /** An older reference. The phone links with {@link EnterpriseActivateResponse.pairingToken}. */
+    token: string;
+    /** Show this as the QR code. */
+    qrData: string;
+    qrDataRaw?: Record<string, any>;
+    expiresAt: string;
+  };
+  /** The client's API key. It works for sending once the phone has linked. */
+  apiKey: { id: string; key: string; permissions: string[] };
+  /** Added by the SDK: the token inside the QR code, the one the callback carries and pairing status answers to. */
+  pairingToken?: string;
+}
+
+export interface EnterpriseClientResponse {
+  success: boolean;
+  /** Missing when the client has no pending or linked activation. */
+  activation?: {
+    id: string;
+    status: EnterpriseActivationState;
+    subAccountId?: string;
+    deviceId?: string;
+    connectedAt?: string;
+    isOnline?: boolean;
+  };
+}
+
+export interface EnterpriseActivationStatusResponse {
+  success: boolean;
+  status: EnterpriseActivationState;
+  subAccountId?: string;
+  externalId?: string;
+  deviceId?: string;
+  connectedAt?: string;
+  isOnline?: boolean;
 }
 
 // ─── Client ─────────────────────────────────────────
@@ -200,30 +323,50 @@ export class SmsTunnelNodeClient {
   // ─── SMS ────────────────────────────────────────────
 
   /** Send a single SMS */
-  async sendSms(to: string, message: string, deviceId?: string): Promise<SendSmsResponse> {
-    return this.post('/api/v1/sms/send', { to, message, deviceId });
+  async sendSms(
+    to: string,
+    message: string,
+    deviceId?: string,
+    options?: SendOptions,
+  ): Promise<SendSmsResponse> {
+    return this.post('/api/v1/sms/send', { to, message, deviceId, ...countryCode(options) });
   }
 
-  /** Send 2FA SMS */
-  async send2FaSms(to: string, message: string): Promise<SendSmsResponse> {
-    return this.post('/api/v1/sms/send-2fa', { to, message });
+  /**
+   * Send a 2FA text. It must contain the code (e.g. `123456`, `12-345678`); it counts against the 2FA quota.
+   */
+  async send2FaSms(
+    to: string,
+    message: string,
+    options?: SendOptions & { deviceId?: string },
+  ): Promise<SendSmsResponse> {
+    return this.post('/api/v1/sms/send-2fa', {
+      to,
+      message,
+      ...(options?.deviceId ? { deviceId: options.deviceId } : {}),
+      ...countryCode(options),
+    });
   }
 
-  /** Send bulk SMS */
+  /** Send the same text to several numbers (up to 100 per call). The phone has to be online. */
   async sendBulkSms(
     to: string[],
     message: string,
     deviceId?: string,
+    options?: SendOptions,
   ): Promise<SendBulkSmsResponse> {
-    return this.post('/api/v1/sms/send-bulk', { to, message, deviceId });
+    return this.post('/api/v1/sms/send-bulk', { to, message, deviceId, ...countryCode(options) });
   }
 
-  /** Get message delivery status */
+  /** Get message delivery status (needs `sms:read`) */
   async getMessageStatus(messageId: string): Promise<MessageStatusResponse> {
-    return this.get(`/api/v1/sms/status/${messageId}`);
+    return this.get(`/api/v1/sms/status/${encodeURIComponent(messageId)}`);
   }
 
-  /** Get received SMS (inbox) */
+  /**
+   * Get received SMS (inbox). Needs an API key allowed to read received texts (`sms:inbox`); others get a
+   * 403 with `code: 'PERMISSION_REQUIRED'`. Keys made by QR pairing never have it.
+   */
   async getReceivedSms(params?: {
     limit?: number;
     page?: number;
@@ -238,14 +381,23 @@ export class SmsTunnelNodeClient {
     if (params?.phone) query.set('phone', params.phone);
     if (params?.deviceId) query.set('deviceId', params.deviceId);
     const qs = query.toString();
-    return this.get(`/api/v1/sms/received${qs ? '?' + qs : ''}`);
+    const res = await this.get<ReceivedSmsResponse>(`/api/v1/sms/received${qs ? '?' + qs : ''}`);
+    for (const text of res.data?.messages ?? []) {
+      text.from = text.sender;
+      text.body = text.message;
+    }
+    return res;
   }
 
   // ─── Devices ────────────────────────────────────────
 
-  /** List devices */
+  /** List the phones of this key's account, and which are online */
   async getDevices(): Promise<DevicesResponse> {
-    return this.get('/api/v1/devices');
+    const res = await this.get<DevicesResponse>('/api/v1/devices');
+    for (const device of res.data?.devices ?? []) {
+      device.lastSeen = device.lastSeenAt;
+    }
+    return res;
   }
 
   /** Get account usage stats */
@@ -288,7 +440,7 @@ export class SmsTunnelNodeClient {
    *
    * Give `to` as well on every plan: the number stays visible to SMSTunnel, so your Messages page can
    * show who each text went to, and only the phone can read the words. Leaving it out, and sealed
-   * texts, are Maximum privacy (Professional and Enterprise plans).
+   * texts, are Maximum privacy (Professional and Enterprise plans); other plans get a 403.
    */
   async sendEncryptedSms(
     encryptedPayload: string,
@@ -349,7 +501,8 @@ export class SmsTunnelNodeClient {
    *                     `{ to, message }`. Strings are passed through as-is.
    * @param publicKeyPem the device RSA public key, in PEM or as the bare base64
    *                     {@link getDevicePublicKey} returns.
-   * @param deviceE2eVersion the device's advertised E2E capability, if known.
+   * @param deviceE2eVersion the device's advertised E2E capability, if known
+   *                     (e.g. `e2eVersion` from {@link getE2EPairingStatus}).
    */
   encrypt(
     payload: string | Record<string, any>,
@@ -409,7 +562,45 @@ export class SmsTunnelNodeClient {
 
   // ─── Unified Pairing v2 ────────────────────────────
 
-  /** Create pairing token (unified v2 flow) */
+  /**
+   * A QR code (and a code to type) that links a phone to your software. Whoever scans it links their own
+   * phone and SMSTunnel account; when they do, SMSTunnel posts `pairing_completed` to `callbackUrl` with
+   * `{ event, token, apiKey, deviceId, deviceName, userId }`. Keep the `apiKey` for that phone, and accept the
+   * callback only when its `token` is the one this call returned.
+   *
+   * Needs no API key (this call doesn't send yours). `callbackUrl` must be https on a public host.
+   */
+  async createPublicPairingToken(params: {
+    displayName: string;
+    displayUrl?: string;
+    callbackUrl?: string;
+    /** Extra fields SMSTunnel keeps with the pairing: `siteName`, `siteUrl`, `siteToken`, `externalId`. */
+    context?: Record<string, string>;
+    expiresInMinutes?: number;
+  }): Promise<PublicPairingTokenResponse> {
+    const context = {
+      ...(params.context ?? {}),
+      ...(params.callbackUrl ? { callbackUrl: params.callbackUrl } : {}),
+    };
+    return this.request(
+      'POST',
+      '/api/v1/pairing/public-create',
+      {
+        source: 'api',
+        displayName: params.displayName,
+        ...(params.displayUrl ? { displayUrl: params.displayUrl } : {}),
+        ...(Object.keys(context).length ? { context } : {}),
+        ...(params.expiresInMinutes ? { expiresInMinutes: params.expiresInMinutes } : {}),
+      },
+      false,
+    );
+  }
+
+  /**
+   * @deprecated SMSTunnel accepts this call only from a dashboard sign-in, not from an API key: with an API key
+   * it answers 401. Use {@link createPublicPairingToken} (a phone linking to your software) or, for a company
+   * account, {@link activateEnterpriseClient}.
+   */
   async createPairingToken(params: {
     source: 'dashboard' | 'wordpress' | 'enterprise' | 'saas' | 'api' | 'e2e';
     displayName: string;
@@ -425,14 +616,44 @@ export class SmsTunnelNodeClient {
     return this.get(`/api/v1/pairing/${encodeURIComponent(token)}`);
   }
 
-  /** List all active pairings */
+  /**
+   * @deprecated SMSTunnel lists pairings only for a dashboard sign-in: with an API key it answers 401.
+   */
   async listPairings(): Promise<any[]> {
     return this.get('/api/v1/pairings');
   }
 
-  /** Unpair (revoke) a pairing */
+  /**
+   * @deprecated SMSTunnel revokes pairings only for a dashboard sign-in: with an API key it answers 401.
+   * The phone's owner can unlink it in the app or the dashboard.
+   */
   async unpair(pairingId: string): Promise<{ success: boolean }> {
     return this.post(`/api/v1/unpair/${encodeURIComponent(pairingId)}`, {});
+  }
+
+  // ─── Enterprise (company accounts) ─────────────────
+  // These need the API key of an Enterprise app (permission `enterprise:saas`); other keys get a 403.
+
+  /**
+   * Start linking one of your clients: makes (or reuses) the client's account and returns the QR code for
+   * the client's phone, and the client's API key. Calling again for the same `externalId` replaces the
+   * earlier activation and its key, while a linked phone stays linked. Two overlapping calls for one
+   * `externalId` can get a 409 with `code: 'CONCURRENT_ACTIVATION'` or `'ALREADY_CONNECTED'`.
+   */
+  async activateEnterpriseClient(params: EnterpriseActivateParams): Promise<EnterpriseActivateResponse> {
+    const res = await this.post<EnterpriseActivateResponse>('/api/v1/saas/activate', params);
+    const pairingToken = pairingTokenOf(res?.activation?.qrData);
+    return pairingToken ? { ...res, pairingToken } : res;
+  }
+
+  /** The client's current activation by your `externalId`: whether its phone has linked and is online. */
+  async getEnterpriseClient(externalId: string): Promise<EnterpriseClientResponse> {
+    return this.get(`/api/v1/saas/client/${encodeURIComponent(externalId)}`);
+  }
+
+  /** One activation by its id (`activation.id` from {@link activateEnterpriseClient}). */
+  async getEnterpriseActivation(activationId: string): Promise<EnterpriseActivationStatusResponse> {
+    return this.get(`/api/v1/saas/status/${encodeURIComponent(activationId)}`);
   }
 
   // ─── Helpers ────────────────────────────────────────
@@ -463,46 +684,34 @@ export class SmsTunnelNodeClient {
   // ─── Internal ──────────────────────────────────────
 
   private async get<T = any>(path: string): Promise<T> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeout);
-
-    try {
-      const res = await fetch(`${this.serverUrl}${path}`, {
-        headers: {
-          'X-API-Key': this.apiKey,
-          'Content-Type': 'application/json',
-        },
-        signal: controller.signal,
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
-      }
-      return data as T;
-    } finally {
-      clearTimeout(timer);
-    }
+    return this.request<T>('GET', path);
   }
 
   private async post<T = any>(path: string, body: any): Promise<T> {
+    return this.request<T>('POST', path, body);
+  }
+
+  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown, withApiKey = true): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
 
     try {
       const res = await fetch(`${this.serverUrl}${path}`, {
-        method: 'POST',
+        method,
         headers: {
-          'X-API-Key': this.apiKey,
+          ...(withApiKey ? { 'X-API-Key': this.apiKey } : {}),
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(body),
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: controller.signal,
       });
 
-      const data = await res.json();
+      const data = await readBody(res);
       if (!res.ok) {
-        throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
+        throw new SmsTunnelApiError(res.status, data);
+      }
+      if (data === undefined || typeof data === 'string') {
+        throw new SmsTunnelApiError(res.status, 'SMSTunnel answered with something that is not JSON.');
       }
       return data as T;
     } finally {
@@ -510,6 +719,14 @@ export class SmsTunnelNodeClient {
     }
   }
 }
+
+function countryCode(options?: SendOptions): { defaultCountryCode?: string } {
+  return options?.defaultCountryCode ? { defaultCountryCode: options.defaultCountryCode } : {};
+}
+
+// ─── Errors ───────────────────────────────────────────────────────────────────
+export { SmsTunnelApiError } from '../shared/api-error';
+export type { SmsTunnelErrorBody } from '../shared/api-error';
 
 // ─── E2E encryptors (re-exported for standalone use) ──────────────────────────
 export {

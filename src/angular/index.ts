@@ -10,6 +10,7 @@ export type {
   CreateTokenResult,
   PairingStatusResult,
   SendSmsResult,
+  ReceivedSmsQuery,
   DeviceE2EStatus,
   DevicePublicKeyInfo,
   VerifyDeviceKeyResult,

@@ -180,7 +180,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
   async function getDeviceE2EStatus(deviceId: string) {
     try {
       const res = await fetch(
-        `${baseUrl}/${routePrefix}/e2e-status/${deviceId}`,
+        `${baseUrl}/${routePrefix}/e2e-status/${encodeURIComponent(deviceId)}`,
         { headers: authHeaders() },
       );
       return await res.json();
@@ -192,7 +192,7 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
   async function getDevicePublicKey(deviceId: string) {
     try {
       const res = await fetch(
-        `${baseUrl}/${routePrefix}/public-key/${deviceId}`,
+        `${baseUrl}/${routePrefix}/public-key/${encodeURIComponent(deviceId)}`,
         { headers: authHeaders() },
       );
       return await res.json();
@@ -214,12 +214,13 @@ export function useSmsTunnel(options: UseSmsTunnelOptions) {
     }
   }
 
-  async function sendEncryptedSms(encryptedPayload: string, deviceId: string, is2FA: boolean = false) {
+  // Give `to` as well: without it the text is Maximum privacy (Professional and Enterprise plans only).
+  async function sendEncryptedSms(encryptedPayload: string, deviceId: string, is2FA: boolean = false, to?: string) {
     try {
       const res = await fetch(`${baseUrl}/${routePrefix}/send-encrypted`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ encryptedPayload, deviceId, is2FA }),
+        body: JSON.stringify({ encryptedPayload, deviceId, is2FA, ...(to !== undefined ? { to } : {}) }),
       });
       return await res.json();
     } catch (err: any) {

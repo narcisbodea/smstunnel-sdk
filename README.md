@@ -39,14 +39,18 @@ const client = new SmsTunnelNodeClient({
 
 // Send SMS
 const result = await client.sendSms('+40721123456', 'Hello!');
+// A number without + or 00 gets the phone's country code, or the one you give:
+await client.sendSms('0721123456', 'Hello!', undefined, { defaultCountryCode: '+40' });
 
-// Send 2FA
+// Send 2FA (the text must contain the code; it counts against the 2FA quota)
 await client.send2FaSms('+40721123456', 'Your code is 123456');
 
 // Send the same text to several of your recipients (max 100 per request, rate-limited)
 await client.sendBulkSms(['+40721111111', '+40722222222'], 'Hello!');
 
-// Get message status
+// Get message status: status is pending | sent | delivered | failed.
+// A text the phone handed to the SIM without a confirmation is reported as failed with
+// unconfirmed: true; deliveryStatus then says 'unconfirmed'. It is never sent twice.
 const status = await client.getMessageStatus('msg-id');
 
 // Get received SMS (synced from your phone, if you enabled sync).
@@ -54,9 +58,11 @@ const status = await client.getMessageStatus('msg-id');
 // Needs an API key you explicitly allowed to read received messages;
 // keys issued through QR pairing cannot read them.
 const received = await client.getReceivedSms({ limit: 20, page: 1 });
+// received.data.messages: [{ id, sender, message, receivedAt, deviceId, deviceName, ... }]
 
-// List devices
+// Your phones, and which are online
 const devices = await client.getDevices();
+// devices.data: { devices: [{ id, name, isOnline, lastSeenAt }], online, total }
 
 // E2E Encryption
 const e2eStatus = await client.getDeviceE2EStatus('device-id');
@@ -77,18 +83,69 @@ await client.encryptAndSendSms('+14155550123', 'Your order has shipped.', 'devic
 const certificate = openCertificate(readFileSync('smstunnel-certificate.json', 'utf8'), process.env.SMSTUNNEL_CERT_PASSWORD);
 await client.sendSealedSms('+14155550123', 'Your order has shipped.', 'device-id', certificate);
 
-// Unified Pairing v2
-const pairing = await client.createPairingToken({
-  source: 'api',
+// Pairing: a QR code (and a code to type) that links someone's phone to your software.
+// When the phone links, SMSTunnel posts { event: 'pairing_completed', token, apiKey, deviceId, deviceName }
+// to callbackUrl (https, public host). Keep that apiKey, and only when token is the one you got here.
+const pairing = await client.createPublicPairingToken({
   displayName: 'My App',
+  callbackUrl: 'https://myapp.com/smstunnel/callback',
 });
-const pairingStatus = await client.getPairingTokenStatus(pairing.data.token);
+// Show pairing.qrData as a QR code, or pairing.pairingCode to type in the app.
+const pairingStatus = await client.getPairingTokenStatus(pairing.token); // pending | completed | expired
 
 // E2E Pairing (with public key exchange)
 const e2ePairing = await client.createE2EPairing({ siteName: 'My App' });
 const e2eResult = await client.pollE2EPairing(e2ePairing.data.token);
-// e2eResult.data.publicKey contains the device's RSA public key
+// e2eResult.data.publicKey is the device's RSA public key; e2eResult.data.e2eVersion the formats it reads
 ```
+
+### Errors
+
+Every method throws `SmsTunnelApiError` when SMSTunnel refuses a call. It is an `Error` with the server's message, plus `status`, `code` and the `body`:
+
+```typescript
+import { SmsTunnelApiError } from '@narcisbodea/smstunnel-sdk/node';
+
+try {
+  await client.getReceivedSms();
+} catch (error) {
+  if (error instanceof SmsTunnelApiError && error.code === 'PERMISSION_REQUIRED') {
+    // error.permission === 'sms:inbox': allow this key to read received messages in the dashboard
+  }
+}
+```
+
+| Status | When |
+|---|---|
+| 401 | The API key is wrong or expired, or its account is suspended |
+| 403 | `code: 'PERMISSION_REQUIRED'`: the key lacks a permission (`error.permission`). Without a code: the text needs a higher plan (an encrypted text without `to`, or a sealed one, needs Professional or Enterprise) |
+| 404 | No such message or phone for this key |
+| 429 | Too many requests, or the daily limit for encrypted texts is reached |
+
+### Enterprise (one app, several organizations)
+
+With the API key of an Enterprise app (it has the `enterprise:saas` permission), you can link each of your clients' phones and see whether they are online:
+
+```typescript
+const company = new SmsTunnelNodeClient({ apiKey: process.env.SMSTUNNEL_ENTERPRISE_API_KEY });
+
+const activation = await company.activateEnterpriseClient({
+  clientName: 'Acme Dental',
+  externalId: 'tenant-42',                           // your own id for this client
+  callbackUrl: 'https://myapp.com/smstunnel/callback', // gets pairing_completed with the client's key
+});
+// Show activation.activation.qrData as a QR code. activation.apiKey.key is the client's key,
+// activation.pairingToken the token the callback carries.
+
+const client42 = await company.getEnterpriseClient('tenant-42');
+// client42.activation: { status: 'pending' | 'connected' | ..., deviceId, isOnline }
+```
+
+Calling `activateEnterpriseClient()` again for the same `externalId` replaces its earlier activation and key; a linked phone stays linked. Two overlapping calls can get a 409 with `code: 'CONCURRENT_ACTIVATION'` or `'ALREADY_CONNECTED'`.
+
+### What an API key can't do
+
+Listing and revoking pairings (`listPairings()`, `unpair()`) and `createPairingToken()` need a dashboard sign-in: with an API key SMSTunnel answers 401. They stay in the client for compatibility. Use `createPublicPairingToken()` or `activateEnterpriseClient()` to link a phone; its owner can unlink it in the app or the dashboard.
 
 ---
 
@@ -237,6 +294,28 @@ SmsTunnelModule.forRootAsync({
 })
 ```
 
+To see whether that organization's phone has linked and is online: `await smsTunnelService.getEnterpriseClientStatus()` (it uses the configured `externalId`, or the one you pass).
+
+### Sending from your backend
+
+Inject `SmsTunnelService` anywhere in your app:
+
+```typescript
+await smsTunnelService.sendSms('+40721123456', 'Your order has shipped.');
+await smsTunnelService.send2fa('+40721123456', '482913', 'Shop: {code} is your code');
+await smsTunnelService.sendBulk([
+  { to: '+40721111111', message: 'See you tomorrow at 10' },
+  { to: '+40722222222', message: 'See you tomorrow at 10' },
+]); // one result per text: { success, results: [{ to, messageId?, error? }] }
+
+// End-to-end encrypted: exchanges keys with the phone on first use, then only the phone reads the words.
+await smsTunnelService.encryptAndSendSms('+40721123456', 'Your code is 482913');
+```
+
+`sendBulk()` sends one request per distinct wording (up to 100 numbers each); requests are rate-limited (30 a minute), so texts that all differ are better sent one by one.
+
+The service returns failures instead of throwing: `{ success: false, error, status, code? }`, where `error` is SMSTunnel's message in words, `status` its HTTP status, and `code` set on errors your software can act on (for example `PERMISSION_REQUIRED` from `getReceivedSms()`, which QR-pairing keys may not use).
+
 ### 3. Auth (secure-by-default since v1.2.3)
 
 > **Breaking change (v1.2.3):** The module now ships a built-in guard
@@ -314,14 +393,23 @@ route returns `400`.
 | `POST /smstunnel/create-token` | createToken | Yes | Generate QR |
 | `GET /smstunnel/pairing-status/:token` | pairingStatus | No | Polling proxy |
 | `POST /smstunnel/callback` | callback | No | Receive API key |
+| `POST /wp-json/smstunnel/v1/setup-callback` | setupCallbackWp | No | Older callback format |
+| `POST /smstunnel/pair-with-key` | pairWithKey | Yes | Pair with an API key instead of a QR code |
 | `POST /smstunnel/unpair` | unpair | Yes | Disconnect device |
-| `POST /smstunnel/send` | sendSms | Yes | Send SMS |
+| `POST /smstunnel/send` | sendSms | Yes | Send SMS `{ to, message }` |
+| `POST /smstunnel/send-2fa` | send2fa | Yes | `{ to, code, template? }` (`{code}` in the template is replaced) |
+| `POST /smstunnel/send-bulk` | sendBulk | Yes | `{ messages: [{ to, message }] }` or `{ to: [...], message }` |
+| `GET /smstunnel/sms-status/:messageId` | smsStatus | Yes | Where a text is now |
+| `GET /smstunnel/received` | receivedSms | Yes | Received texts (`limit`, `page`, `since`, `phone`, `deviceId`); the key must be allowed to read them |
+| `GET /smstunnel/devices` | devices | Yes | Your phones, and which are online |
+| `GET /smstunnel/usage` | usage | Yes | Today's usage and limits |
 | `POST /smstunnel/update-config` | updateConfig | Yes | Set server URL |
-| `GET /smstunnel/e2e-status/:deviceId` | getDeviceE2EStatus | Yes | E2E encryption status |
-| `GET /smstunnel/public-key/:deviceId` | getDevicePublicKey | Yes | Get device public key |
-| `POST /smstunnel/verify-key` | verifyDeviceKey | Yes | Verify key fingerprint |
-| `POST /smstunnel/send-encrypted` | sendEncryptedSms | Yes | Send encrypted SMS |
-| `GET /smstunnel/pairings` | getPairings | Yes | List active pairings |
+| `POST /smstunnel/exchange-keys` | exchangeKeys | Yes | Fetch and keep the phone's public key |
+| `GET /smstunnel/e2e-status/:deviceId` | e2eStatus | Yes | E2E encryption status |
+| `GET /smstunnel/public-key/:deviceId` | publicKey | Yes | Get device public key |
+| `POST /smstunnel/verify-key` | verifyKey | Yes | Verify key fingerprint |
+| `POST /smstunnel/send-encrypted` | sendEncrypted | Yes | `{ encryptedPayload, deviceId, to, is2FA? }`: give `to` unless you are on Professional or Enterprise |
+| `GET /smstunnel/pairings` | pairings | Yes | Deprecated: SMSTunnel answers 401 to an API key |
 
 ---
 
@@ -379,7 +467,8 @@ function MySmsSettings() {
   const e2eStatus = await tunnel.getDeviceE2EStatus('device-id');
   const publicKey = await tunnel.getDevicePublicKey('device-id');
   const keyValid = await tunnel.verifyDeviceKey('device-id', 'fingerprint');
-  await tunnel.sendEncryptedSms('payload', 'device-id');
+  // payload encrypted by your backend; give the number too (needed below Professional)
+  await tunnel.sendEncryptedSms('payload', 'device-id', false, '+40721123456');
 
   if (tunnel.status === 'paired') {
     return <div>Connected: {tunnel.deviceName}</div>;
@@ -460,7 +549,7 @@ const tunnel = useSmsTunnel({
 // E2E Encryption
 const e2eStatus = await tunnel.getDeviceE2EStatus('device-id');
 const publicKey = await tunnel.getDevicePublicKey('device-id');
-await tunnel.sendEncryptedSms('payload', 'device-id');
+await tunnel.sendEncryptedSms('payload', 'device-id', false, '+40721123456');
 </script>
 
 <template>
@@ -518,16 +607,15 @@ export class SmsPairingComponent {
     // Pairing
     const status = await this.sms.getStatus();
     const token = await this.sms.createToken();
-    const pairings = await this.sms.getPairings();
     await this.sms.unpair();
 
     // SMS
     await this.sms.sendSms('+40721123456', 'Hello!');
-    await this.sms.send2fa('+40721123456', '123456');
-    await this.sms.sendBulk([{ to: '+40721111111', message: 'Hi' }]); // several recipients, max 100
+    await this.sms.send2fa('+40721123456', '123456', 'Shop: {code} is your code');
+    await this.sms.sendBulk([{ to: '+40721111111', message: 'Hi' }]); // several recipients, one result each
     const msgStatus = await this.sms.getSmsStatus('msg-id');
     // Received SMS need a key you explicitly allowed to read them; QR-pairing keys cannot.
-    const received = await this.sms.getReceivedSms();
+    const received = await this.sms.getReceivedSms({ limit: 20 });
 
     // Devices
     const devices = await this.sms.getDevices();
@@ -537,10 +625,12 @@ export class SmsPairingComponent {
     const e2eStatus = await this.sms.getDeviceE2EStatus('device-id');
     const publicKey = await this.sms.getDevicePublicKey('device-id');
     const verification = await this.sms.verifyDeviceKey('device-id', 'fingerprint');
-    await this.sms.sendEncryptedSms('payload', 'device-id');
+    await this.sms.sendEncryptedSms('payload', 'device-id', false, '+40721123456');
   }
 }
 ```
+
+`provideSmsTunnel()` takes `getAuthHeaders` (full control) or `getToken` (adds `Authorization: Bearer`).
 
 ---
 
@@ -626,9 +716,13 @@ All SDKs support end-to-end encryption using RSA-2048. The device holds the priv
 
 1. Check if device has E2E enabled: `getDeviceE2EStatus(deviceId)`
 2. Get the device's public key: `getDevicePublicKey(deviceId)`
-3. Encrypt your message with the RSA public key (client-side)
-4. Send encrypted: `sendEncryptedSms(encryptedPayload, deviceId)`
+3. Encrypt `{ to, message }` with the RSA public key, on your server (`encrypt()` in `/node` and `/server`; browsers can't)
+4. Send encrypted with the number as well: `sendEncryptedSms(encryptedPayload, deviceId, ...)` with `to`
 5. Device decrypts with its private key
+
+`encryptAndSendSms()` (`/node` and `/server`) does steps 2 to 4 in one call.
+
+Leaving `to` out, so SMSTunnel never sees the number, and sealed texts (`sendSealedSms()`) are Maximum privacy: Professional and Enterprise plans. On other plans SMSTunnel refuses them with a 403. A phone locked to a certificate refuses anything not sealed with it.
 
 ### Key Verification
 
@@ -651,12 +745,11 @@ import { SmsTunnelClient } from '@narcisbodea/smstunnel-sdk';
 const client = new SmsTunnelClient({
   apiBaseUrl: '/api',
   getAuthHeaders: () => ({ Authorization: 'Bearer ...' }),
-  routePrefix: 'smstunnel', // default
   pollInterval: 3000,       // default
 });
 
 // Pairing
-await client.getStatus();                    // { paired, serverUrl, deviceName }
+await client.getStatus();                    // { paired, serverUrl, deviceName, e2eEnabled }
 await client.createToken();                  // { success, token, qrData, ... }
 await client.getPairingStatus(token);        // { status, displayName }
 client.startPolling(token, (event) => ...);  // returns cleanup fn
@@ -665,13 +758,16 @@ await client.unpair();
 
 // SMS
 await client.sendSms('+40741234567', 'Hi');
+await client.send2fa('+40741234567', '123456');
+await client.getSmsStatus('msg-id');
+await client.getDevices();                   // { data: { devices: [{ id, name, isOnline }], online, total } }
 await client.updateServerUrl('https://...');
 
 // E2E Encryption
 await client.getDeviceE2EStatus('device-id');
 await client.getDevicePublicKey('device-id');
 await client.verifyDeviceKey('device-id', 'fingerprint');
-await client.sendEncryptedSms('payload', 'device-id');
+await client.sendEncryptedSms('payload', 'device-id', false, '+40741234567');
 
 client.destroy();                            // cleanup
 ```
@@ -702,7 +798,7 @@ Custom labels: implement the `SmsTunnelLabels` interface.
 | `@narcisbodea/smstunnel-sdk/react` | `SmsTunnelPairing`, `QrCodeCanvas`, `useSmsTunnel` |
 | `@narcisbodea/smstunnel-sdk/vue` | `SmsTunnelPairing`, `QrCodeCanvas`, `useSmsTunnel` |
 | `@narcisbodea/smstunnel-sdk/angular` | `SmsTunnelService`, `provideSmsTunnel`, `SMSTUNNEL_CONFIG` |
-| `@narcisbodea/smstunnel-sdk/node` | `SmsTunnelNodeClient` |
+| `@narcisbodea/smstunnel-sdk/node` | `SmsTunnelNodeClient`, `SmsTunnelApiError`, `encryptPayload`, `openCertificate`, `createCertificate`, `sealText`, `certificateFingerprint` |
 
 ## License
 

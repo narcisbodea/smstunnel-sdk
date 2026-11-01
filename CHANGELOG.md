@@ -1,6 +1,66 @@
 # Changelog
 
-## [2.1.0] - 2026-10-31
+## [2.1.0] - 2026-11-01
+
+Checked call by call against smstunnel.io as of 2026-11-01 (end-to-end encryption on every plan, Maximum privacy on
+Professional and Enterprise).
+
+### Fixed: calls that never worked against the server
+
+- **NestJS `sendBulk()` / `POST /smstunnel/send-bulk`** sent `{ messages }`, which SMSTunnel refuses (400). It now groups
+  the texts by wording and sends `{ to: [...], message }`, up to 100 numbers per request, and returns one result per
+  text: `{ success, results: [{ to, messageId?, error? }] }`. The route also takes `{ to: [...], message }`.
+- **NestJS `send2fa()` / `POST /smstunnel/send-2fa`** sent `{ to, code, template }`, which SMSTunnel refuses (400). It
+  now sends the text: `template` with `{code}` replaced, the template followed by the code, or
+  `Your verification code: <code>`. The route also takes `{ to, message }`.
+- **NestJS `exchangeKeys()`** asked for `GET /api/v1/devices/:id`, which an API key can't reach (404), and read the
+  phone list from the wrong place, so it never stored a key and `encryptAndSendSms()` always failed. It now uses
+  `/public-key` and `/e2e-status`. `encryptAndSendSms()` exchanges keys first when none are stored.
+- **NestJS `pairWithApiKey()`** read the phone list from the wrong place: it stored no `deviceId` and named every phone
+  "Android Phone". `sendSealedSms()` finds the phone the same way when none is stored.
+- **Browser routes `GET /smstunnel/e2e-status/:deviceId`, `GET /smstunnel/public-key/:deviceId` and
+  `POST /smstunnel/verify-key`** were called by `SmsTunnelClient`, React, Vue and Angular and listed in this README, but
+  the controller had lost them in 1.1.8 (404). They are back, with `getDeviceE2EStatus()`, `getDevicePublicKey()` and
+  `verifyDeviceKey()` on `SmsTunnelService`.
+- **`POST /smstunnel/send-encrypted` dropped `to`**, and since 2026-10-31 SMSTunnel refuses an encrypted text without it
+  below Professional (403). The route passes it on, and `sendEncryptedSms()` in `SmsTunnelClient`, React, Vue and
+  Angular takes it as a 4th argument: `sendEncryptedSms(payload, deviceId, is2FA, to)`.
+- **Angular** `provideSmsTunnel({ getAuthHeaders })`, shown in this README, was ignored. It works now.
+
+### Changed
+
+- **NestJS failures have one shape:** SMSTunnel's body plus `success: false`, the HTTP `status` and `error` in words,
+  e.g. `{ success: false, status: 403, code: 'PERMISSION_REQUIRED', permission: 'sms:inbox', error: 'This API key may
+  not read received texts…' }`. Before, the raw body came back with no `success`, and `error` was often only
+  `Forbidden`. If you compared `error` with `'Forbidden'`, compare `status` instead. `createPairingToken()` keeps
+  `error: 'SMSTunnel returned error: <status>'` and adds `status` and `code` (e.g. `CONCURRENT_ACTIVATION`).
+- **Node errors:** the client throws `SmsTunnelApiError`, still an `Error` with the server's message, now with `status`,
+  `code`, `permission` and `body`. A list of validation messages is joined with `; ` (it was joined with `,`).
+- **Types now match what the server sends** (compile-time only: code that compiled against the old shapes was
+  reading fields that never arrived):
+  - `SmsTunnelClient` (`@narcisbodea/smstunnel-sdk`): `DevicesResponse.data` is `{ devices, online, total }` (was an
+    array), `ReceivedSmsResponse.data` is `{ messages, total, page, limit, hasMore }` (was an array),
+    `AccountUsageResponse.data` is `{ plan, usage, limits, remaining }`, `SmsStatusResponse.data` is `{ id,
+    phoneNumber, status, deliveryStatus, ... }`, `SendSmsResponse.data.remaining` is `{ clean, total }`.
+  - Angular `DevicesResult.data` is `{ devices, online, total }`.
+  - Node: received texts have `sender` and `message` (and `isEncrypted`, `deviceName`, ...), phones have `lastSeenAt`,
+    message status has `deliveryStatus` and `unconfirmed`, E2E pairing status has `e2eVersion`, usage is typed. The
+    old names `from`, `body` and `lastSeen` keep working: the SDK fills them in, marked deprecated.
+  - `SaasActivateResult.activation.pairingCode` is optional: SMSTunnel doesn't send one in the Enterprise flow.
+- **Deprecated, because SMSTunnel answers 401 to an API key** (they need a dashboard sign-in): Node `createPairingToken()`,
+  `listPairings()`, `unpair()`; `getPairings()` everywhere. They still make the same call.
+
+### New
+
+- Node `createPublicPairingToken({ displayName, callbackUrl })`: a QR code and a code to type that link a phone to your
+  software, without sending your API key.
+- Node Enterprise calls (Enterprise app key): `activateEnterpriseClient()`, `getEnterpriseClient(externalId)`,
+  `getEnterpriseActivation(activationId)`. NestJS: `getEnterpriseClientStatus()`.
+- Node `sendSms()`, `send2FaSms()` and `sendBulkSms()` take `{ defaultCountryCode }`; `send2FaSms()` also `{ deviceId }`.
+- `getReceivedSms()` takes `limit`, `page`, `since`, `phone`, `deviceId` in the NestJS service and route, `SmsTunnelClient`
+  and Angular.
+
+### Also in 2.1.0
 
 - **Fixed:** encrypting failed with the key phones actually report (bare base64 SPKI, `ERR_OSSL_UNSUPPORTED`).
   `encrypt()` and `encryptAndSendSms()` now take PEM or bare base64.

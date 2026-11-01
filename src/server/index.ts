@@ -20,15 +20,21 @@ export type {
   CanActivateLike,
   SmsTunnelStatus,
   SendSmsResult,
+  SendBulkResult,
+  ReceivedSmsQuery,
   CreateTokenResult,
   PairingStatusResult,
   PairingCallbackBody,
   LegacyCallbackBody,
   SaasActivateResult,
+  EnterpriseClientStatusResult,
+  PairWithApiKeyResult,
+  ExchangeKeysResult,
   DeviceE2EStatus,
   DevicePublicKeyInfo,
   VerifyDeviceKeyResult,
 } from './smstunnel.interfaces';
+export type { SmsTunnelFailure, SmsTunnelErrorBody } from '../shared/api-error';
 
 // ─── E2E encryptors (Node-only; safe to import server-side) ───────────────────
 export {

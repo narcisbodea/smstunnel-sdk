@@ -4,6 +4,7 @@ import {
   Get,
   Body,
   Param,
+  Query,
   Inject,
   Logger,
   UseGuards,
@@ -18,6 +19,7 @@ import type {
   SmsTunnelModuleOptions,
   PairingCallbackBody,
   LegacyCallbackBody,
+  ReceivedSmsQuery,
 } from './smstunnel.interfaces';
 
 /**
@@ -160,21 +162,25 @@ export class SmsTunnelController implements OnModuleInit {
   // ─── Extended SMS endpoints ────────────────────────
 
   /**
-   * Send a 2FA SMS.
+   * Send a 2FA SMS: `{ to, code, template? }` (`{code}` in the template is replaced), or `{ to, message }`.
    * Route: POST /{prefix}/send-2fa
    */
   @Post('smstunnel/send-2fa')
-  async send2fa(@Body() body: { to: string; code: string; template?: string }) {
-    return this.smsTunnelService.send2fa(body.to, body.code, body.template);
+  async send2fa(@Body() body: { to: string; code?: string; template?: string; message?: string }) {
+    return this.smsTunnelService.send2fa(body.to, body.code ?? '', body.template ?? body.message);
   }
 
   /**
-   * Send bulk SMS.
+   * Send texts to several numbers: `{ messages: [{ to, message }] }`, or `{ to: [...], message }`.
    * Route: POST /{prefix}/send-bulk
    */
   @Post('smstunnel/send-bulk')
-  async sendBulk(@Body() body: { messages: Array<{ to: string; message: string }> }) {
-    return this.smsTunnelService.sendBulk(body.messages);
+  async sendBulk(
+    @Body() body: { messages?: Array<{ to: string; message: string }>; to?: string[]; message?: string },
+  ) {
+    return Array.isArray(body?.to)
+      ? this.smsTunnelService.sendBulk(body.to, body.message)
+      : this.smsTunnelService.sendBulk(body?.messages ?? []);
   }
 
   /**
@@ -187,12 +193,12 @@ export class SmsTunnelController implements OnModuleInit {
   }
 
   /**
-   * Get received SMS (inbox).
+   * Get received SMS (inbox). Query: limit, page, since, phone, deviceId.
    * Route: GET /{prefix}/received
    */
   @Get('smstunnel/received')
-  async receivedSms() {
-    return this.smsTunnelService.getReceivedSms();
+  async receivedSms(@Query() query: ReceivedSmsQuery) {
+    return this.smsTunnelService.getReceivedSms(query);
   }
 
   // ─── E2E Encryption ────────────────────────────────
@@ -208,17 +214,46 @@ export class SmsTunnelController implements OnModuleInit {
   }
 
   /**
-   * Send encrypted SMS.
+   * Get E2E encryption status for a device.
+   * Route: GET /{prefix}/e2e-status/:deviceId
+   */
+  @Get('smstunnel/e2e-status/:deviceId')
+  async e2eStatus(@Param('deviceId') deviceId: string) {
+    return this.smsTunnelService.getDeviceE2EStatus(deviceId);
+  }
+
+  /**
+   * Get device public key for E2E encryption.
+   * Route: GET /{prefix}/public-key/:deviceId
+   */
+  @Get('smstunnel/public-key/:deviceId')
+  async publicKey(@Param('deviceId') deviceId: string) {
+    return this.smsTunnelService.getDevicePublicKey(deviceId);
+  }
+
+  /**
+   * Verify device key fingerprint.
+   * Route: POST /{prefix}/verify-key
+   */
+  @Post('smstunnel/verify-key')
+  async verifyKey(@Body() body: { deviceId: string; fingerprint: string }) {
+    return this.smsTunnelService.verifyDeviceKey(body?.deviceId, body?.fingerprint);
+  }
+
+  /**
+   * Send encrypted SMS. Give `to` too: without it the text is Maximum privacy, which needs the
+   * Professional or Enterprise plan (other plans get `{ success: false, status: 403 }`).
    * Route: POST /{prefix}/send-encrypted
    */
   @Post('smstunnel/send-encrypted')
   async sendEncrypted(
-    @Body() body: { encryptedPayload: string; deviceId: string; is2FA?: boolean },
+    @Body() body: { encryptedPayload: string; deviceId: string; is2FA?: boolean; to?: string },
   ) {
     return this.smsTunnelService.sendEncryptedSms(
       body.encryptedPayload,
       body.deviceId,
       body.is2FA,
+      body.to,
     );
   }
 

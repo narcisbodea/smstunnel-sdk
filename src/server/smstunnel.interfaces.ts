@@ -122,17 +122,70 @@ export interface SmsTunnelStatus {
 export interface SendSmsResult {
   success: boolean;
   messageId?: string;
+  /** `true` when the phone was offline: it gets the text when it is back. */
+  queued?: boolean;
+  /** What went wrong, in words. */
   error?: string;
+  /** On a failure: the HTTP status SMSTunnel answered with (403: permission or plan, 429: limit). */
+  status?: number;
+  /** On some failures: a stable code, e.g. `PERMISSION_REQUIRED`. */
+  code?: string;
+  /** SMSTunnel's details, on the calls that pass its answer through (2FA, encrypted, sealed). */
+  data?: {
+    messageId: string;
+    branded: boolean;
+    queued?: boolean;
+    remaining: { clean: number; total: number | string };
+  };
+}
+
+export interface SendBulkResult {
+  /** `true` only when every text went out. */
+  success: boolean;
+  /** One per text, in the order given. */
+  results: Array<{ to: string; messageId?: string; error?: string }>;
+  error?: string;
+}
+
+export interface ReceivedSmsQuery {
+  limit?: number;
+  page?: number;
+  /** ISO date: only texts received after it. */
+  since?: string;
+  /** Part of the sender's number. */
+  phone?: string;
+  deviceId?: string;
 }
 
 export interface CreateTokenResult {
   success: boolean;
   token?: string;
+  /** Missing in Enterprise mode, where the phone links by the QR code only. */
   pairingCode?: string;
   qrData?: string;
   expiresAt?: string;
   pollUrl?: string;
   error?: string;
+  /** On a failure: the HTTP status SMSTunnel answered with. */
+  status?: number;
+  /** On a 409 in Enterprise mode: `CONCURRENT_ACTIVATION` or `ALREADY_CONNECTED` (call again, or use the other result). */
+  code?: string;
+}
+
+export interface EnterpriseClientStatusResult {
+  success: boolean;
+  /** Missing when the client has no pending or linked activation. */
+  activation?: {
+    id: string;
+    status: 'pending' | 'connected' | 'expired' | 'cancelled';
+    subAccountId?: string;
+    deviceId?: string;
+    connectedAt?: string;
+    isOnline?: boolean;
+  };
+  error?: string;
+  status?: number;
+  code?: string;
 }
 
 export interface PairingStatusResult {
@@ -148,6 +201,8 @@ export interface PairingCallbackBody {
   deviceId?: string;
   deviceName?: string;
   userId?: string;
+  /** Sent too when the pairing was made with a `siteToken`. */
+  site_token?: string;
 }
 
 export interface SaasActivateResult {
@@ -156,9 +211,12 @@ export interface SaasActivateResult {
   activation?: {
     id: string;
     subAccountId: string;
+    /** An older reference. The phone links with the token inside `qrData`. */
     token: string;
-    pairingCode: string;
+    /** Not sent by SMSTunnel in this flow. */
+    pairingCode?: string;
     qrData: string;
+    qrDataRaw?: Record<string, any>;
     expiresAt: string;
   };
   apiKey?: {
