@@ -57,7 +57,7 @@ export interface SmsTunnelNodeClientOptions {
 
 /** Options for a plain text. */
 export interface SendOptions {
-  /** Used for a number without `+` or `00`, e.g. `+40`. The phone's own setting wins when it has one. */
+  /** Used for a number without `+` or `00`, e.g. `+40`. It always takes precedence over the phone's own setting. */
   defaultCountryCode?: string;
 }
 

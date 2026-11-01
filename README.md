@@ -39,7 +39,7 @@ const client = new SmsTunnelNodeClient({
 
 // Send SMS
 const result = await client.sendSms('+40721123456', 'Hello!');
-// A number without + or 00 gets the phone's country code, or the one you give:
+// A number without + or 00 gets the country code you give; it always takes precedence over the phone's:
 await client.sendSms('0721123456', 'Hello!', undefined, { defaultCountryCode: '+40' });
 
 // Send 2FA (the text must contain the code; it counts against the 2FA quota)
@@ -410,6 +410,61 @@ route returns `400`.
 | `POST /smstunnel/verify-key` | verifyKey | Yes | Verify key fingerprint |
 | `POST /smstunnel/send-encrypted` | sendEncrypted | Yes | `{ encryptedPayload, deviceId, to, is2FA? }`: give `to` unless you are on Professional or Enterprise |
 | `GET /smstunnel/pairings` | pairings | Yes | Deprecated: SMSTunnel answers 401 to an API key |
+
+---
+
+## Build it with an AI assistant
+
+Paste this into Claude, ChatGPT, Cursor or Copilot and replace the part in brackets. Don't paste your API key into the chat: the prompt doesn't need it.
+
+```text
+Help me send text messages from my Node.js or NestJS server with SMSTunnel.
+
+About SMSTunnel (https://smstunnel.io): my own apps and tools hand text messages (SMS) to my
+SMSTunnel account, and my own Android phone sends them from my own number, on my own SIM and plan.
+The phone runs the SMSTunnel app from Google Play
+(https://play.google.com/store/apps/details?id=io.smstunnel.app), signed in to my account.
+
+What I want: [describe what should send a text, to whom, and when]
+
+How it works:
+- npm install @narcisbodea/smstunnel-sdk (2.1.0 or newer; Node 18+). Plain Node.js: import {
+  SmsTunnelNodeClient, SmsTunnelApiError } from '@narcisbodea/smstunnel-sdk/node'; new
+  SmsTunnelNodeClient({ apiKey: process.env.SMSTUNNEL_API_KEY }).
+- sendSms(to, message, deviceId?, { defaultCountryCode }?) and send2FaSms(to, message, { deviceId,
+  defaultCountryCode }?) answer { success, messageId, queued }; getMessageStatus(messageId) answers
+  data.status and data.deliveryStatus. Error answers throw SmsTunnelApiError (status, code such as
+  PERMISSION_REQUIRED, permission, body; no headers: after a 429, wait a minute).
+- NestJS: SmsTunnelModule.forRoot({ storage, callbackBaseUrl, authenticate }) from
+  '@narcisbodea/smstunnel-sdk/server'; storage.getConfig() returns { serverUrl:
+  'https://smstunnel.io', apiKey }, the key from SMSTUNNEL_API_KEY or saved by updateConfig() at
+  pairing. Without authenticate(req) or authGuard, only callback and pairing-status are open.
+- SmsTunnelService: sendSms(to, message), send2fa(to, code, template?) ({code} is replaced),
+  getSmsStatus(messageId); failures come back as { success: false, error, status, code? }.
+- One call sends one text to one number: loop for several. Numbers in international format;
+  defaultCountryCode (e.g. '+44') completes numbers written without + or 00 and always takes
+  precedence over the phone's own country setting. Texts up to 1600 characters; 30 send requests a
+  minute. queued: true means the phone is offline and the text goes out when it is back.
+- Sign-in codes: the text must contain the code as 4 to 10 digits (or 123-456), up to 320
+  characters; codes have their own daily allowance. deliveryStatus 'unconfirmed' means handed to the
+  SIM without a confirmation: probably sent, never resend it automatically.
+- Browser code must call my own server, never SMSTunnel with the key: this package's /react, /vue
+  and /angular parts call my NestJS module's /smstunnel routes (apiBaseUrl).
+- The API key comes from my SMSTunnel dashboard (https://dashboard.smstunnel.io): Apps → Add an app
+  → Create the key. It is shown only once and can send texts and check whether they went out.
+
+Rules for your answer:
+- Keep the API key in an environment variable or the platform's secret store (for example
+  SMSTUNNEL_API_KEY). Never put it in source code, in a repository, or in code that runs in a
+  browser or a mobile app: call SMSTunnel from a server. I will not paste my key in this chat; use a
+  placeholder.
+- Validate phone numbers before sending (international format, like +14155550123) and skip or report
+  the invalid ones.
+- Handle errors: log or show what went wrong, retry only after 429, 5xx or network errors and only a
+  few times, and never send the same text twice.
+- Only send texts people expect from me: alerts to myself, reminders, sign-in codes, updates they
+  asked for. No unsolicited texts.
+```
 
 ---
 
