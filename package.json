@@ -1,6 +1,6 @@
 {
   "name": "@narcisbodea/smstunnel-sdk",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "SMSTunnel SDK - send texts from your own software through your own Android phone and number. QR pairing, sending and E2E encryption for Node.js, NestJS, React, Vue and Angular",
   "keywords": [
     "smstunnel",

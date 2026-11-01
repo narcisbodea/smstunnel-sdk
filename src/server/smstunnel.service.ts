@@ -21,6 +21,7 @@ import type {
   VerifyDeviceKeyResult,
   EnterpriseClientStatusResult,
   ReceivedSmsQuery,
+  SmsStatusResult,
 } from './smstunnel.interfaces';
 
 /** The phones in a `GET /api/v1/devices` answer, which is `{ success, data: { devices, online, total } }`. */
@@ -372,6 +373,8 @@ export class SmsTunnelService {
           success: true,
           messageId: data.messageId,
           ...(data.queued ? { queued: true } : {}),
+          // `branded` and today's `remaining` allowance, as SMSTunnel answered them.
+          ...(data.data ? { data: data.data } : {}),
         };
       }
 
@@ -574,7 +577,7 @@ export class SmsTunnelService {
    * Get SMS delivery status (needs `sms:read`). `data.deliveryStatus` has the real state; an unconfirmed
    * text shows as `status: 'failed'` with `unconfirmed: true`.
    */
-  async getSmsStatus(messageId: string): Promise<any> {
+  async getSmsStatus(messageId: string): Promise<SmsStatusResult> {
     return this.apiGet(`/api/v1/sms/status/${encodeURIComponent(messageId)}`);
   }
 
@@ -854,8 +857,12 @@ export class SmsTunnelService {
     return { deviceId };
   }
 
-  /** Make an authenticated GET request to SMSTunnel */
-  private async apiGet(path: string): Promise<any> {
+  /**
+   * Advanced: an authenticated GET to any SMSTunnel API path, for a call this module doesn't wrap yet,
+   * e.g. `apiGet('/api/v1/account/usage')`. Returns SMSTunnel's answer as it is, or on a failure
+   * `{ success: false, status, error }` (plus `code` when SMSTunnel sends one).
+   */
+  async apiGet(path: string): Promise<any> {
     const config = await this.options.storage.getConfig();
     if (!config.apiKey || !config.serverUrl) {
       return { success: false, error: 'SMSTunnel is not configured.' };
@@ -863,8 +870,11 @@ export class SmsTunnelService {
     return this.request(config.serverUrl, config.apiKey, 'GET', path);
   }
 
-  /** Make an authenticated POST request to SMSTunnel */
-  private async apiPost(path: string, body: any): Promise<any> {
+  /**
+   * Advanced: an authenticated POST to any SMSTunnel API path, with the same answers as `apiGet`.
+   * Prefer the typed methods (`sendSms`, `send2fa`, ...) when one fits.
+   */
+  async apiPost(path: string, body: any): Promise<any> {
     const config = await this.options.storage.getConfig();
     if (!config.apiKey || !config.serverUrl) {
       return { success: false, error: 'SMSTunnel is not configured.' };
