@@ -19,9 +19,13 @@
   ],
   "author": "NARBOWEB SRL",
   "license": "MIT",
+  "homepage": "https://smstunnel.io/docs/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/narcisbodea/smstunnel-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/narcisbodea/smstunnel-sdk/issues"
   },
   "publishConfig": {
     "access": "public"
