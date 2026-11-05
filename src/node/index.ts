@@ -21,7 +21,9 @@
  * ```
  *
  * Every method throws {@link SmsTunnelApiError} when SMSTunnel answers with an error status; it carries the
- * HTTP `status`, the `code` (e.g. `PERMISSION_REQUIRED`) and the body.
+ * HTTP `status`, the `code` (e.g. `PERMISSION_REQUIRED`), `retryAfter` and the body.
+ *
+ * The client never retries on its own. To retry a send safely, give it an `idempotencyKey` (see {@link SendOptions}).
  */
 
 import {
@@ -31,7 +33,7 @@ import {
 } from '../shared/e2e-crypto';
 import { sealText } from '../shared/sealed-crypto';
 import type { SealedCertificate } from '../shared/sealed-crypto';
-import { SmsTunnelApiError, readBody } from '../shared/api-error';
+import { SmsTunnelApiError, readBody, retryAfterOf } from '../shared/api-error';
 import { pairingTokenOf } from '../shared/pairing-token';
 
 // ─── Options ────────────────────────────────────────
@@ -59,6 +61,31 @@ export interface SmsTunnelNodeClientOptions {
 export interface SendOptions {
   /** Used for a number without `+` or `00`, e.g. `+40`. It always takes precedence over the phone's own setting. */
   defaultCountryCode?: string;
+  /**
+   * Makes the call safe to retry. It goes out as the `Idempotency-Key` header. For 24 hours, a repeat of the same call
+   * with the same key gets the first answer back (the same `messageId`) instead of a second text; the same key with a
+   * different text, number, phone or country code is refused (422, `code: 'IDEMPOTENCY_KEY_REUSED'`). When the first
+   * try was refused with a 4xx, nothing went out and a corrected retry with the same key runs.
+   *
+   * One new key per text, the same key on every retry of that text: `crypto.randomUUID()`, or your own id such as
+   * `order-1042-shipped`. 1 to 255 printable ASCII characters, no spaces at the ends; anything else throws a
+   * `TypeError` before the call is made.
+   */
+  idempotencyKey?: string;
+}
+
+/** Options for an encrypted text you encrypted yourself. */
+export interface SendEncryptedOptions {
+  is2FA?: boolean;
+  /** Checked first with {@link SmsTunnelNodeClient.verifyDeviceKey}; a different key answers `success: false`. */
+  expectedFingerprint?: string;
+  /** The number, visible to SMSTunnel. Leaving it out is Maximum privacy (Professional and Enterprise plans). */
+  to?: string;
+  /**
+   * As in {@link SendOptions}: a retry with the same key and the same `encryptedPayload` gets the first answer back.
+   * Encrypt once and retry with that payload: encrypting again gives a different payload, which the key refuses.
+   */
+  idempotencyKey?: string;
 }
 
 // ─── Response types ─────────────────────────────────
@@ -322,30 +349,35 @@ export class SmsTunnelNodeClient {
 
   // ─── SMS ────────────────────────────────────────────
 
-  /** Send a single SMS */
+  /** Send a single SMS. With `options.idempotencyKey`, a retry can't send it twice. */
   async sendSms(
     to: string,
     message: string,
     deviceId?: string,
     options?: SendOptions,
   ): Promise<SendSmsResponse> {
-    return this.post('/api/v1/sms/send', { to, message, deviceId, ...countryCode(options) });
+    return this.post('/api/v1/sms/send', { to, message, deviceId, ...countryCode(options) }, options?.idempotencyKey);
   }
 
   /**
    * Send a 2FA text. It must contain the code (e.g. `123456`, `12-345678`); it counts against the 2FA quota.
+   * With `options.idempotencyKey`, a retry can't send it twice.
    */
   async send2FaSms(
     to: string,
     message: string,
     options?: SendOptions & { deviceId?: string },
   ): Promise<SendSmsResponse> {
-    return this.post('/api/v1/sms/send-2fa', {
-      to,
-      message,
-      ...(options?.deviceId ? { deviceId: options.deviceId } : {}),
-      ...countryCode(options),
-    });
+    return this.post(
+      '/api/v1/sms/send-2fa',
+      {
+        to,
+        message,
+        ...(options?.deviceId ? { deviceId: options.deviceId } : {}),
+        ...countryCode(options),
+      },
+      options?.idempotencyKey,
+    );
   }
 
   /** Send the same text to several numbers (up to 100 per call). The phone has to be online. */
@@ -355,7 +387,11 @@ export class SmsTunnelNodeClient {
     deviceId?: string,
     options?: SendOptions,
   ): Promise<SendBulkSmsResponse> {
-    return this.post('/api/v1/sms/send-bulk', { to, message, deviceId, ...countryCode(options) });
+    return this.post(
+      '/api/v1/sms/send-bulk',
+      { to, message, deviceId, ...countryCode(options) },
+      options?.idempotencyKey,
+    );
   }
 
   /** Get message delivery status (needs `sms:read`) */
@@ -445,8 +481,10 @@ export class SmsTunnelNodeClient {
   async sendEncryptedSms(
     encryptedPayload: string,
     deviceId: string,
-    options?: { is2FA?: boolean; expectedFingerprint?: string; to?: string },
+    options?: SendEncryptedOptions,
   ): Promise<SendSmsResponse> {
+    // A bad key throws before anything is asked of SMSTunnel, the fingerprint check included.
+    idempotencyHeaders(options?.idempotencyKey);
     // Verify E2E status before sending
     if (options?.expectedFingerprint) {
       const verification = await this.verifyDeviceKey(deviceId, options.expectedFingerprint);
@@ -458,19 +496,26 @@ export class SmsTunnelNodeClient {
       }
     }
 
-    return this.post('/api/v1/sms/send', {
-      ...(options?.to !== undefined ? { to: options.to } : {}),
-      encrypted: true,
-      encryptedPayload,
-      deviceId,
-      is2FA: options?.is2FA || false,
-    });
+    return this.post(
+      '/api/v1/sms/send',
+      {
+        ...(options?.to !== undefined ? { to: options.to } : {}),
+        encrypted: true,
+        encryptedPayload,
+        deviceId,
+        is2FA: options?.is2FA || false,
+      },
+      options?.idempotencyKey,
+    );
   }
 
   /**
    * Maximum privacy: seals the number and the text with your private certificate and sends the packet
    * without `to`. Only your software and the phone holding the certificate can read either.
    * Open the certificate once with {@link openCertificate} and keep the result in memory.
+   *
+   * Every call seals anew, so a retry is a different packet. For a retry that can't send twice, seal once with
+   * {@link sealText} and send that packet with {@link sendEncryptedSms} and an `idempotencyKey`.
    */
   async sendSealedSms(
     to: string,
@@ -523,6 +568,9 @@ export class SmsTunnelNodeClient {
    * Pass `deviceE2eVersion` if you know the device's advertised capability
    * (from the backend); without it the call stays on v1 even when
    * `e2eHybrid` is enabled.
+   *
+   * Every call encrypts anew, so a retry is a different payload. For a retry that can't send twice, encrypt once with
+   * {@link encrypt} and send that payload with {@link sendEncryptedSms} and an `idempotencyKey`.
    */
   async encryptAndSendSms(
     to: string,
@@ -592,7 +640,7 @@ export class SmsTunnelNodeClient {
         ...(Object.keys(context).length ? { context } : {}),
         ...(params.expiresInMinutes ? { expiresInMinutes: params.expiresInMinutes } : {}),
       },
-      false,
+      { withApiKey: false },
     );
   }
 
@@ -687,11 +735,18 @@ export class SmsTunnelNodeClient {
     return this.request<T>('GET', path);
   }
 
-  private async post<T = any>(path: string, body: any): Promise<T> {
-    return this.request<T>('POST', path, body);
+  private async post<T = any>(path: string, body: any, idempotencyKey?: string): Promise<T> {
+    return this.request<T>('POST', path, body, { idempotencyKey });
   }
 
-  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown, withApiKey = true): Promise<T> {
+  private async request<T>(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+    options: { withApiKey?: boolean; idempotencyKey?: string } = {},
+  ): Promise<T> {
+    // Checked before the timer starts: a bad key throws, and nothing is sent.
+    const idempotency = idempotencyHeaders(options.idempotencyKey);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
 
@@ -699,8 +754,9 @@ export class SmsTunnelNodeClient {
       const res = await fetch(`${this.serverUrl}${path}`, {
         method,
         headers: {
-          ...(withApiKey ? { 'X-API-Key': this.apiKey } : {}),
+          ...(options.withApiKey !== false ? { 'X-API-Key': this.apiKey } : {}),
           'Content-Type': 'application/json',
+          ...idempotency,
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: controller.signal,
@@ -708,7 +764,7 @@ export class SmsTunnelNodeClient {
 
       const data = await readBody(res);
       if (!res.ok) {
-        throw new SmsTunnelApiError(res.status, data);
+        throw new SmsTunnelApiError(res.status, data, retryAfterOf(res.headers.get('retry-after')));
       }
       if (data === undefined || typeof data === 'string') {
         throw new SmsTunnelApiError(res.status, 'SMSTunnel answered with something that is not JSON.');
@@ -724,7 +780,23 @@ function countryCode(options?: SendOptions): { defaultCountryCode?: string } {
   return options?.defaultCountryCode ? { defaultCountryCode: options.defaultCountryCode } : {};
 }
 
+// What SMSTunnel accepts as an Idempotency-Key (printable ASCII, at most 255), without spaces at the ends: the server
+// trims them, and a key of spaces only would silently mean no key at all.
+const IDEMPOTENCY_KEY = /^[\x21-\x7e](?:[\x20-\x7e]{0,253}[\x21-\x7e])?$/;
+
+/** The `Idempotency-Key` header for `key`, none when it is undefined; a `TypeError` when it can't be one. */
+function idempotencyHeaders(key: unknown): { 'Idempotency-Key'?: string } {
+  if (key === undefined) return {};
+  if (typeof key !== 'string' || !IDEMPOTENCY_KEY.test(key)) {
+    throw new TypeError(
+      'idempotencyKey must be 1 to 255 printable ASCII characters, without spaces at the ends (a UUID is a good choice).',
+    );
+  }
+  return { 'Idempotency-Key': key };
+}
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
+// `retryAfter` (seconds) comes from the answer's Retry-After header.
 export { SmsTunnelApiError } from '../shared/api-error';
 export type { SmsTunnelErrorBody } from '../shared/api-error';
 

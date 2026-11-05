@@ -39,25 +39,54 @@ export function errorMessageOf(body: unknown, status: number): string {
  * - 403: the key lacks a permission (`code: 'PERMISSION_REQUIRED'`), or the text needs a higher plan (Maximum
  *   privacy: an encrypted text without `to`, or a sealed one, needs Professional or Enterprise).
  * - 404: no such message or phone for this key.
- * - 429: too many requests, or the daily limit for encrypted texts is reached.
+ * - 409 with `code: 'IDEMPOTENCY_KEY_IN_PROGRESS'`: a request with the same `idempotencyKey` is still running; try
+ *   again after `retryAfter` seconds to get its answer.
+ * - 422 with `code: 'IDEMPOTENCY_KEY_REUSED'`: the `idempotencyKey` was already used for a different text.
+ * - 429: too many requests (`retryAfter` says when to try again), or a daily limit is reached (no `retryAfter`).
  */
 export class SmsTunnelApiError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly permission?: string;
   readonly body: unknown;
+  /**
+   * The answer's `Retry-After`, in seconds (an HTTP date is turned into the seconds left until it): set on a 429 for
+   * too many requests and on a 409 for an `idempotencyKey` still in progress. Undefined when SMSTunnel sent none.
+   */
+  readonly retryAfter?: number;
 
-  constructor(status: number, body: unknown) {
+  constructor(status: number, body: unknown, retryAfter?: number) {
     super(errorMessageOf(body, status));
     this.name = 'SmsTunnelApiError';
     this.status = status;
     this.body = body;
+    if (typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter >= 0) {
+      this.retryAfter = retryAfter;
+    }
     if (body && typeof body === 'object') {
       const fields = body as SmsTunnelErrorBody;
       if (typeof fields.code === 'string') this.code = fields.code;
       if (typeof fields.permission === 'string') this.permission = fields.permission;
     }
   }
+}
+
+/**
+ * Seconds to wait, from a `Retry-After` header: delay-seconds (`17`) or an HTTP date
+ * (`Wed, 06 Nov 2026 08:49:37 GMT`, turned into the seconds left until then, at least 0). Undefined when the header
+ * is missing or is neither.
+ */
+export function retryAfterOf(header: string | null | undefined, now: number = Date.now()): number | undefined {
+  if (typeof header !== 'string') return undefined;
+  const value = header.trim();
+  if (/^\d+$/.test(value)) {
+    const seconds = Number(value);
+    return Number.isSafeInteger(seconds) ? seconds : undefined;
+  }
+  // An HTTP date names its day or month; Date.parse alone would also read strings such as "1.5".
+  if (!/[a-z]{3}/i.test(value)) return undefined;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
 /**
