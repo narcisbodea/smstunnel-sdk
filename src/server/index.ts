@@ -1,6 +1,7 @@
 export { SmsTunnelModule } from './smstunnel.module';
 export { SmsTunnelService } from './smstunnel.service';
 export { SmsTunnelController } from './smstunnel.controller';
+export { SmsTunnelLegacyController } from './smstunnel.legacy.controller';
 export { SmsTunnelAuthGuard } from './smstunnel.guard';
 export {
   SmsTunnelPublic,

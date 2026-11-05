@@ -18,7 +18,6 @@ import { SmsTunnelPublic } from './smstunnel.public.decorator';
 import type {
   SmsTunnelModuleOptions,
   PairingCallbackBody,
-  LegacyCallbackBody,
   ReceivedSmsQuery,
 } from './smstunnel.interfaces';
 
@@ -30,6 +29,9 @@ import type {
  * Consumers supply their auth strategy via `SmsTunnelModule.forRoot()`
  * (`authenticate` predicate or `authGuard`). If none is supplied, all
  * non-public routes are blocked (fail-closed) and a warning is logged.
+ *
+ * The older WordPress-style callback lives in {@link SmsTunnelLegacyController}, mounted only with
+ * `enableLegacyCallback: true`.
  */
 @UseGuards(SmsTunnelAuthGuard)
 @Controller()
@@ -38,6 +40,8 @@ export class SmsTunnelController implements OnModuleInit {
   private readonly prefix: string;
 
   constructor(
+    // Explicit tokens: the package is built without decorator metadata (see SmsTunnelAuthGuard).
+    @Inject(SmsTunnelService)
     private readonly smsTunnelService: SmsTunnelService,
     @Inject(SMSTUNNEL_OPTIONS)
     private readonly options: SmsTunnelModuleOptions,
@@ -87,32 +91,16 @@ export class SmsTunnelController implements OnModuleInit {
   }
 
   /**
-   * Callback from SMSTunnel after pairing completes.
+   * Callback from SMSTunnel after pairing completes. Public, so the body may come from anyone: it is accepted only
+   * for the pairing this app started, and only once (see `SmsTunnelService.handlePairingCallback`).
    * Route: POST /{prefix}/callback
    */
   @SmsTunnelPublic()
   @Post('smstunnel/callback')
   async pairingCallback(@Body() body: PairingCallbackBody) {
-    this.logger.log(
-      `SMSTunnel callback: event=${body.event}, token=${body.token?.substring(0, 8)}...`,
-    );
+    // Nothing from the body here: the service logs why a callback was refused, never the token or the key.
+    this.logger.log('SMSTunnel pairing callback received');
     const success = await this.smsTunnelService.handlePairingCallback(body);
-    return { success };
-  }
-
-  /**
-   * WordPress-compatible legacy callback.
-   * Route: POST /wp-json/smstunnel/v1/setup-callback
-   */
-  @SmsTunnelPublic()
-  @Post('wp-json/smstunnel/v1/setup-callback')
-  async setupCallbackWp(@Body() body: LegacyCallbackBody) {
-    this.logger.log(`SMSTunnel legacy callback. Status: ${body.status || 'unknown'}`);
-    const success = await this.smsTunnelService.handleLegacyCallback(
-      body.site_token,
-      body.api_key,
-      body.device_name,
-    );
     return { success };
   }
 

@@ -16,7 +16,9 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": true
+    // tsup (esbuild) can't emit decorator metadata, so every NestJS constructor parameter names its token with
+    // @Inject(). Turned off, tsup no longer looks for @swc/core: the build is the same on every machine.
+    "emitDecoratorMetadata": false
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]

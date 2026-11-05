@@ -25,6 +25,13 @@ export interface SmsTunnelModuleOptions {
   callbackBaseUrl: string;
   displayName?: string;
   displayUrl?: string;
+  /**
+   * Mount the older WordPress-style callback, `POST /wp-json/smstunnel/v1/setup-callback`
+   * (`{ site_token, api_key, device_name }`). QR pairing doesn't need it: SMSTunnel posts to `/smstunnel/callback`.
+   *
+   * Default `false` since 2.2.0 (the route was always mounted before): with `forRoot()` the route isn't mounted, with
+   * `forRootAsync()` it answers 404. When enabled, it follows the same rules as `/smstunnel/callback`.
+   */
   enableLegacyCallback?: boolean;
 
   /** Enterprise App API Key for SaaS mode.
@@ -221,6 +228,10 @@ export interface PairingStatusResult {
   error?: string;
 }
 
+/**
+ * What SMSTunnel posts to `/smstunnel/callback` when a phone scans the QR code. `handlePairingCallback()` checks every
+ * field: the body of a public route may come from anyone.
+ */
 export interface PairingCallbackBody {
   event: string;
   token: string;

@@ -5,6 +5,7 @@ export const SMSTUNNEL_DEFAULT_PREFIX = 'smstunnel';
 /**
  * Public paths that should be excluded from auth guards.
  * Use with your global guard to skip auth on callback/polling routes.
+ * The last one, the older WordPress-style callback, is mounted only with `enableLegacyCallback: true`.
  *
  * Example (NestJS):
  *   if (SMSTUNNEL_PUBLIC_PATHS.some(p => request.url.includes(p))) return true;

@@ -24,12 +24,16 @@ import type { SmsTunnelModuleOptions } from './smstunnel.interfaces';
  *
  * The guard is registered automatically by the module (via `@UseGuards`
  * on the controller) so consumers do not need to wire it up themselves.
+ *
+ * Every constructor parameter names its token with `@Inject()`: the package is built without decorator metadata,
+ * and NestJS can't infer a type it doesn't have (2.1.1 failed exactly here).
  */
 @Injectable()
 export class SmsTunnelAuthGuard implements CanActivate {
   private readonly logger = new Logger(SmsTunnelAuthGuard.name);
 
   constructor(
+    @Inject(Reflector)
     private readonly reflector: Reflector,
     @Inject(SMSTUNNEL_OPTIONS)
     private readonly options: SmsTunnelModuleOptions,
