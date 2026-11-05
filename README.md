@@ -32,8 +32,9 @@ Works without NestJS or any framework. Uses native `fetch` (Node 18+), zero exte
 ```typescript
 import { SmsTunnelNodeClient } from '@narcisbodea/smstunnel-sdk/node';
 
+// The key from dashboard.smstunnel.io → Apps → Add an app, kept in an environment variable, never in the code.
 const client = new SmsTunnelNodeClient({
-  apiKey: 'sk_live_xxx',
+  apiKey: process.env.SMSTUNNEL_API_KEY!,
   serverUrl: 'https://smstunnel.io',
 });
 
@@ -45,8 +46,10 @@ await client.sendSms('0721123456', 'Hello!', undefined, { defaultCountryCode: '+
 // Send 2FA (the text must contain the code; it counts against the 2FA quota)
 await client.send2FaSms('+40721123456', 'Your code is 123456');
 
-// Send the same text to several of your recipients (max 100 per request, rate-limited)
-await client.sendBulkSms(['+40721111111', '+40722222222'], 'Hello!');
+// Several people: one text per person, one call per number
+for (const to of ['+40721111111', '+40722222222']) {
+  await client.sendSms(to, 'Hello!');
+}
 
 // Get message status: status is pending | sent | delivered | failed.
 // A text the phone handed to the SIM without a confirmation is reported as failed with
