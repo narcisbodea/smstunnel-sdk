@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.1] - 2026-11-02
+
+From a report by an app built on the NestJS module.
+
+- **NestJS `sendSms()`** now also returns SMSTunnel's details in `data`: `branded` (a short free-plan line was
+  added) and today's `remaining` allowance, as `send2fa()` and the encrypted calls already did. `queued` is unchanged.
+- **NestJS `getSmsStatus()`** is typed: `SmsStatusResult`, with `unconfirmed` and `deliveryStatus`
+  (`SmsDeliveryStatus`), both exported.
+- **NestJS `apiGet()` / `apiPost()`** are public, for API calls this module doesn't wrap yet. They answer like the
+  other calls: SMSTunnel's body, or `{ success: false, status, error, code? }`.
+- README: "Build it with an AI assistant" prompt; country codes: `defaultCountryCode` always takes precedence
+  (server rule since 2026-11-01).
+
 ## [2.1.0] - 2026-11-01
 
 Checked call by call against smstunnel.io as of 2026-11-01 (end-to-end encryption on every plan, Maximum privacy on

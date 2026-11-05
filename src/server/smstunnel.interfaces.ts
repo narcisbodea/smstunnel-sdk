@@ -130,13 +130,40 @@ export interface SendSmsResult {
   status?: number;
   /** On some failures: a stable code, e.g. `PERMISSION_REQUIRED`. */
   code?: string;
-  /** SMSTunnel's details, on the calls that pass its answer through (2FA, encrypted, sealed). */
+  /**
+   * SMSTunnel's details: `branded` (a short free-plan line was added) and today's `remaining` allowance.
+   * Present on success for `sendSms`, 2FA, encrypted and sealed texts.
+   */
   data?: {
     messageId: string;
     branded: boolean;
     queued?: boolean;
     remaining: { clean: number; total: number | string };
   };
+}
+
+/** Where a text is now. `unconfirmed`: handed to the SIM, but the phone got no confirmation (final, never retried). */
+export type SmsDeliveryStatus = 'pending' | 'sent' | 'delivered' | 'failed' | 'unconfirmed';
+
+/** The answer of `getSmsStatus()` (`GET /api/v1/sms/status/:id`, needs `sms:read`). */
+export interface SmsStatusResult {
+  success: boolean;
+  data?: {
+    id: string;
+    /** For an encrypted text sent without `to`, the message id in brackets. */
+    phoneNumber: string;
+    /** An unconfirmed text shows here as `failed` with `unconfirmed: true`; `deliveryStatus` has the real state. */
+    status: 'pending' | 'sent' | 'delivered' | 'failed';
+    unconfirmed?: boolean;
+    deliveryStatus?: SmsDeliveryStatus;
+    sentAt?: string;
+    deliveredAt?: string;
+    errorMessage?: string | null;
+  };
+  /** On a failure: what went wrong, the HTTP status and, sometimes, a stable code. */
+  error?: string;
+  status?: number;
+  code?: string;
 }
 
 export interface SendBulkResult {

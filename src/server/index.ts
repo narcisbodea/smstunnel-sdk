@@ -20,6 +20,8 @@ export type {
   CanActivateLike,
   SmsTunnelStatus,
   SendSmsResult,
+  SmsStatusResult,
+  SmsDeliveryStatus,
   SendBulkResult,
   ReceivedSmsQuery,
   CreateTokenResult,
