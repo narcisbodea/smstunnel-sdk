@@ -5,7 +5,10 @@ import { sealText } from '../shared/sealed-crypto';
 import type { SealedCertificate } from '../shared/sealed-crypto';
 import { failureOf, readBody } from '../shared/api-error';
 import { pairingTokenOf } from '../shared/pairing-token';
+import { describeForLog, isStoredToken, readLegacyCallback, readPairingCallback } from './smstunnel.callback';
+import type { CallbackFields } from './smstunnel.callback';
 import type {
+  SmsTunnelConfig,
   SmsTunnelModuleOptions,
   SmsTunnelStatus,
   SendSmsResult,
@@ -64,6 +67,10 @@ export class SmsTunnelService {
    * Create a pairing token on SMSTunnel server.
    * Uses Enterprise/SaaS flow when enterpriseApiKey is configured,
    * otherwise falls back to public-create flow.
+   *
+   * Starts a new pairing: once SMSTunnel has issued the token, it is stored and the stored API key is cleared
+   * (`apiKey: ''`), so the phone's `pairing_completed` callback, which brings the new key, finds none. Until the
+   * phone scans the QR code, `getStatus()` answers `paired: false`. Nothing is stored when the call fails.
    */
   async createPairingToken(): Promise<CreateTokenResult> {
     const config = await this.options.storage.getConfig();
@@ -111,10 +118,15 @@ export class SmsTunnelService {
       }
 
       const data: any = await res.json();
+      if (typeof data?.token !== 'string' || !data.token) {
+        this.logger.warn('SMSTunnel create token: the answer has no pairing token');
+        return { success: false, error: 'SMSTunnel answered without a pairing token.' };
+      }
 
-      await this.options.storage.updateConfig({ siteToken: data.token });
+      // A new pairing: the callback that completes it is accepted only while no key is stored.
+      await this.options.storage.updateConfig({ siteToken: data.token, apiKey: '' });
 
-      this.logger.log(`Pairing token created: ${data.token?.substring(0, 12)}...`);
+      this.logger.log('Pairing token created');
 
       return {
         success: true,
@@ -173,17 +185,16 @@ export class SmsTunnelService {
       // The phone pairs with the token inside the QR code: it is the one the pairing_completed callback
       // carries and the one pairing status answers to. `activation.token` is only an older reference.
       const pairingToken = pairingTokenOf(data.activation.qrData) ?? data.activation.token;
-
-      const configUpdate: Record<string, any> = { siteToken: pairingToken };
-
-      // If the server returned an API key, save it too
-      if (data.apiKey?.key) {
-        configUpdate.apiKey = data.apiKey.key;
+      if (typeof pairingToken !== 'string' || !pairingToken) {
+        this.logger.warn('SMSTunnel SaaS activate: the answer has no pairing token');
+        return { success: false, error: 'SMSTunnel answered without a pairing token.' };
       }
 
-      await this.options.storage.updateConfig(configUpdate);
+      // A new pairing, as in the public flow: the stored key is cleared, and the activation's key (`data.apiKey`) is
+      // not kept. The key this app sends with arrives in the phone's pairing_completed callback.
+      await this.options.storage.updateConfig({ siteToken: pairingToken, apiKey: '' });
 
-      this.logger.log(`SaaS pairing token created: ${pairingToken?.substring(0, 12)}... (isNew: ${data.isNew})`);
+      this.logger.log(`SaaS pairing token created (isNew: ${data.isNew})`);
 
       return {
         success: true,
@@ -211,7 +222,8 @@ export class SmsTunnelService {
     const serverUrl = config.serverUrl.replace(/\/$/, '');
 
     try {
-      const res = await fetch(`${serverUrl}/api/v1/pairing/${token}`);
+      // The token comes from a public route: encoded, it can only ever name a token.
+      const res = await fetch(`${serverUrl}/api/v1/pairing/${encodeURIComponent(String(token))}`);
       if (!res.ok) {
         return { status: 'expired' };
       }
@@ -222,66 +234,83 @@ export class SmsTunnelService {
   }
 
   /**
-   * Handle callback from SMSTunnel after pairing completes.
+   * Handle the `pairing_completed` callback SMSTunnel posts when a phone scans this app's QR code. It is a public
+   * route, so the body may come from anyone. It is accepted, and its key stored, only when:
+   * - `event` is `pairing_completed`, `token` and `apiKey` are strings of visible characters (16 to 512), and
+   *   `deviceId` (up to 128) and `deviceName` (up to 256) are strings when present;
+   * - a token is stored (`createPairingToken()` stores it) and the posted one is that token, compared in constant time;
+   * - no API key is stored yet: `createPairingToken()` clears it, so a real pairing finds none, and a token can't be
+   *   used again once its phone is paired.
+   *
+   * @returns `true` when the key was stored; `false` when the callback was refused (nothing is stored, and the reason
+   *   is logged without the token or the key).
    */
   async handlePairingCallback(body: PairingCallbackBody): Promise<boolean> {
-    if (body.event !== 'pairing_completed') {
-      this.logger.warn(`Unknown callback event: ${body.event}`);
+    const reading = readPairingCallback(body);
+    if (!reading.ok) {
+      this.logger.warn(`Pairing callback refused: ${reading.reason}.`);
       return false;
     }
-
-    const config = await this.options.storage.getConfig();
-
-    if (config.siteToken && config.siteToken !== body.token) {
-      this.logger.warn(
-        `Callback token mismatch: expected ${config.siteToken?.substring(0, 8)}, got ${body.token?.substring(0, 8)}`,
-      );
-      return false;
-    }
-
-    const update: Record<string, any> = {
-      apiKey: body.apiKey,
-      deviceName: body.deviceName || 'Android Phone',
-    };
-    if (body.deviceId) {
-      update.deviceId = body.deviceId;
-    }
-    await this.options.storage.updateConfig(update);
-
-    this.logger.log(
-      `SMSTunnel paired! Device: ${body.deviceName}, API key: ${body.apiKey?.substring(0, 12)}...`,
-    );
-
-    // Auto-exchange keys after pairing
-    if (body.deviceId) {
-      this.exchangeKeys().catch((err) =>
-        this.logger.warn(`Auto key exchange failed: ${err.message}`),
-      );
-    }
-
-    return true;
+    return this.completePairing('Pairing callback', reading.fields, 'Android Phone');
   }
 
   /**
-   * Handle legacy WordPress-compatible callback.
+   * Handle the older WordPress-style callback (`{ site_token, api_key, device_name }`), with the same rules as
+   * {@link handlePairingCallback}: `siteToken` must be the stored token and no API key may be stored yet.
    */
   async handleLegacyCallback(
     siteToken: string,
     apiKey: string,
     deviceName?: string,
   ): Promise<boolean> {
+    const reading = readLegacyCallback(siteToken, apiKey, deviceName);
+    if (!reading.ok) {
+      this.logger.warn(`Legacy callback refused: ${reading.reason}.`);
+      return false;
+    }
+    return this.completePairing('Legacy callback', reading.fields);
+  }
+
+  /** Stores the callback's key when this app is waiting for exactly this pairing. */
+  private async completePairing(
+    label: string,
+    fields: CallbackFields,
+    defaultDeviceName?: string,
+  ): Promise<boolean> {
     const config = await this.options.storage.getConfig();
 
-    if (config.siteToken !== siteToken) {
-      this.logger.warn('Legacy callback: site_token mismatch');
+    if (!isStoredToken(config.siteToken, fields.token)) {
+      this.logger.warn(
+        `${label} refused: ${
+          config.siteToken
+            ? 'the token is not the one this app is waiting for'
+            : 'this app is not waiting for a pairing (no token is stored)'
+        }.`,
+      );
+      return false;
+    }
+    if (config.apiKey) {
+      this.logger.warn(
+        `${label} refused: this app already has an API key. To link another phone, unpair or create a new QR code first.`,
+      );
       return false;
     }
 
-    const update: Partial<{ apiKey: string; deviceName: string }> = { apiKey };
+    const update: Partial<SmsTunnelConfig> = { apiKey: fields.apiKey };
+    const deviceName = fields.deviceName ?? defaultDeviceName;
     if (deviceName) update.deviceName = deviceName;
-
+    if (fields.deviceId) update.deviceId = fields.deviceId;
     await this.options.storage.updateConfig(update);
-    this.logger.log(`SMSTunnel paired (legacy). Device: ${deviceName || 'unknown'}`);
+
+    this.logger.log(`SMSTunnel paired! Device: ${describeForLog(deviceName ?? 'unknown', 80)}`);
+
+    // Auto-exchange keys after pairing
+    if (fields.deviceId) {
+      this.exchangeKeys().catch((err) =>
+        this.logger.warn(`Auto key exchange failed: ${err.message}`),
+      );
+    }
+
     return true;
   }
 
