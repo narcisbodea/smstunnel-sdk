@@ -1,5 +1,79 @@
 # Changelog
 
+## [2.2.0] - 2026-11-06
+
+### Security: the NestJS pairing callback could store someone else's API key
+
+`POST /smstunnel/callback` is a public route: SMSTunnel's server posts the phone's new API key there when the phone
+scans your QR code. Up to 2.1.1, the token check was skipped whenever no token was stored: before the first QR
+pairing, after pairing with an API key, and after unpairing. In those states the route stored a key sent by anyone,
+and from then on your app's texts, sign-in codes included, would have gone out through that person's account. The
+older `POST /wp-json/smstunnel/v1/setup-callback` had the same flaw. Update if you use `SmsTunnelModule`, or if you call
+`handlePairingCallback()` or `handleLegacyCallback()` yourself.
+
+A callback is now stored only when all of these hold:
+
+- a token is stored, and the posted token is that token, compared in constant time;
+- no API key is stored yet. `createPairingToken()` now clears the stored key when it stores a new token (see Changed),
+  so a real pairing always finds none, and a token can't be used again once its phone is paired;
+- `token` and `apiKey` are strings of visible characters (16 to 512), and `deviceId` (up to 128) and `deviceName` (up
+  to 256) are strings when present.
+
+Anything else answers `{ success: false }` and stores nothing, and the log says why without the token or the key (it
+used to show the first characters of both).
+
+To check an app that ran an older version: send yourself a text from it and look for it on dashboard.smstunnel.io. A
+text goes through the account of the key the app stores, so if it isn't there, or you are unsure, unpair and pair the
+phone again.
+
+### Changed
+
+- **`createPairingToken()` starts a new pairing.** Once SMSTunnel has issued the token, it is stored and the stored API
+  key is cleared (`apiKey: ''`), so `paired` is `false` until the phone scans the QR code. When the call fails, or
+  SMSTunnel's answer has no token, nothing is stored. The React and Vue pairing components offer a QR code only when
+  no phone is paired, so they behave as before.
+- **Enterprise mode: the activation's key is no longer stored.** `createPairingToken()` used to keep the `apiKey` of
+  the `/api/v1/saas/activate` answer. Now the key arrives with the phone's `pairing_completed` callback, as in the
+  public flow. If your app makes a new QR code for a client whose phone is already linked, it stops sending for that
+  client until the phone scans the new code. The Node client's `activateEnterpriseClient()` still returns the
+  activation's key.
+- **`enableLegacyCallback` is honoured, and off by default.** `POST /wp-json/smstunnel/v1/setup-callback` is mounted
+  by `forRoot()` only with `enableLegacyCallback: true`; with `forRootAsync()`, whose options are known only at
+  runtime, the route stays mapped and answers 404 unless the options enable it. Before 2.2.0 it was always mounted,
+  although the option existed. QR pairing doesn't use this route. It now lives in `SmsTunnelLegacyController`.
+- The pairing-status proxy (`GET /smstunnel/pairing-status/:token`) puts the token into SMSTunnel's URL encoded.
+
+### Fixed
+
+- **`SmsTunnelModule.forRoot()` and `forRootAsync()` work again, on NestJS 10, 11 and 12** (checked with 10.4.22,
+  11.2.8 and 12.3.3, in CommonJS and ESM apps). 2.1.1 was built without decorator metadata, so NestJS 11 and 12
+  stopped at startup (`Nest can't resolve dependencies of the SmsTunnelAuthGuard (?, SMSTUNNEL_OPTIONS)`), and on
+  NestJS 10 every route the module mounts answered 500. Every class the module provides now names its dependencies
+  with `@Inject()`, so nothing depends on metadata, neither in this build nor in your tsconfig. `SmsTunnelService`
+  used on its own, without the module, worked before and is unchanged.
+- **TypeScript with `"moduleResolution": "node"`** (older NestJS projects) finds `/node`, `/server`, `/react`, `/vue`
+  and `/angular` (TS2307 before), through `typesVersions`. `node16`, `nodenext` and `bundler` are unchanged.
+
+### New: safe retries in the Node client (`/node`)
+
+- **`idempotencyKey`** in the options of `sendSms()`, `send2FaSms()` and `sendEncryptedSms()` (and of every call that
+  takes the same options). It goes out as the `Idempotency-Key` header. For 24 hours, a repeat of the same call with
+  the same key gets the first answer back (the same `messageId`) instead of a second text; the same key with a
+  different text, number, phone or country code is refused (422, `code: 'IDEMPOTENCY_KEY_REUSED'`). Use one new key
+  per text and the same key on every retry of it. A key SMSTunnel can't take (empty, over 255 characters, not printable
+  ASCII, spaces at the ends) throws a `TypeError` before anything is sent.
+- **`SmsTunnelApiError.retryAfter`**: the seconds of the answer's `Retry-After`, on a 429 for too many requests and on
+  a 409 for a key whose first try is still running (`code: 'IDEMPOTENCY_KEY_IN_PROGRESS'`). Undefined when SMSTunnel
+  sends none, for example on a 429 for a daily limit.
+- The client still never retries on its own. `encryptAndSendSms()` and `sendSealedSms()` encrypt anew on every call,
+  so they take no key: encrypt once with `encrypt()` or `sealText()` and retry `sendEncryptedSms()` with the key.
+
+### Package
+
+- `npm test` builds the package and runs its tests: the callback rules, the module on NestJS, the Node client and
+  TypeScript resolution. `prepublishOnly` runs it.
+- The build no longer asks for decorator metadata, so it is the same with or without `@swc/core` installed.
+
 ## [2.1.1] - 2026-11-02
 
 From a report by an app built on the NestJS module.

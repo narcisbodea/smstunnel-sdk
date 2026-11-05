@@ -23,6 +23,8 @@ The phone needs the SMSTunnel app from Google Play:
 npm install @narcisbodea/smstunnel-sdk
 ```
 
+TypeScript finds every entry point with any `moduleResolution`: `node`, `node16`, `nodenext` or `bundler`. Before 2.2.0, `"node"` reported TS2307 for `/node` and `/server`.
+
 ---
 
 ## Node.js (Standalone)
@@ -88,7 +90,8 @@ await client.sendSealedSms('+14155550123', 'Your order has shipped.', 'device-id
 
 // Pairing: a QR code (and a code to type) that links someone's phone to your software.
 // When the phone links, SMSTunnel posts { event: 'pairing_completed', token, apiKey, deviceId, deviceName }
-// to callbackUrl (https, public host). Keep that apiKey, and only when token is the one you got here.
+// to callbackUrl (https, public host). Keep that apiKey only when token is the one you got here
+// (compare in constant time), and only once: anyone can post to a public URL.
 const pairing = await client.createPublicPairingToken({
   displayName: 'My App',
   callbackUrl: 'https://myapp.com/smstunnel/callback',
@@ -104,7 +107,7 @@ const e2eResult = await client.pollE2EPairing(e2ePairing.data.token);
 
 ### Errors
 
-Every method throws `SmsTunnelApiError` when SMSTunnel refuses a call. It is an `Error` with the server's message, plus `status`, `code` and the `body`:
+Every method throws `SmsTunnelApiError` when SMSTunnel refuses a call. It is an `Error` with the server's message, plus `status`, `code`, `retryAfter` (seconds, from the answer's `Retry-After`) and the `body`:
 
 ```typescript
 import { SmsTunnelApiError } from '@narcisbodea/smstunnel-sdk/node';
@@ -123,7 +126,42 @@ try {
 | 401 | The API key is wrong or expired, or its account is suspended |
 | 403 | `code: 'PERMISSION_REQUIRED'`: the key lacks a permission (`error.permission`). Without a code: the text needs a higher plan (an encrypted text without `to`, or a sealed one, needs Professional or Enterprise) |
 | 404 | No such message or phone for this key |
-| 429 | Too many requests, or the daily limit for encrypted texts is reached |
+| 409 | `code: 'IDEMPOTENCY_KEY_IN_PROGRESS'`: the first try with this `idempotencyKey` is still running; try again after `retryAfter` seconds to get its answer |
+| 422 | `code: 'IDEMPOTENCY_KEY_REUSED'`: this `idempotencyKey` was already used for a different text |
+| 429 | Too many requests: `retryAfter` says when to try again. Without `retryAfter`: a daily limit is reached |
+
+A timeout rejects with a `DOMException` named `AbortError`, an unreachable server with `TypeError: fetch failed`: no answer came, so the text may or may not have gone out.
+
+### Retrying a send
+
+The client never retries on its own. To retry a text without risking a second copy, give the send an `idempotencyKey`: one new key per text, the same key on every retry of that text. It goes out as the `Idempotency-Key` header, and for 24 hours SMSTunnel answers a repeat with its first answer (the same `messageId`) instead of sending again.
+
+```typescript
+import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { SmsTunnelApiError } from '@narcisbodea/smstunnel-sdk/node';
+
+const idempotencyKey = randomUUID(); // or your own id for this text, e.g. `order-1042-shipped`
+
+for (let attempt = 1; ; attempt++) {
+  try {
+    await client.sendSms('+40721123456', 'Your order #1042 has shipped.', undefined, { idempotencyKey });
+    break;
+  } catch (error) {
+    // Again only when no answer came (timeout, network) or SMSTunnel said when (retryAfter, in seconds).
+    const wait = error instanceof SmsTunnelApiError ? error.retryAfter : 2;
+    if (wait === undefined || attempt === 3) throw error;
+    await sleep(wait * 1000);
+  }
+}
+```
+
+- `send2FaSms()` and `sendEncryptedSms()` take `idempotencyKey` in their options too.
+- The same key with a different text, number, phone or country code gets 422 (`IDEMPOTENCY_KEY_REUSED`), and nothing goes out.
+- A refusal (4xx) means nothing went out: fix the cause, then retry with the same key. A server error (5xx) is kept with the key, because the text may have gone out before it: a retry gets the same error back. Check your dashboard before sending that text again with a new key.
+- `encryptAndSendSms()` and `sendSealedSms()` encrypt anew on every call, so a retry would be a different packet: they take no key. Encrypt once with `encrypt()` or `sealText()`, then retry `sendEncryptedSms(payload, deviceId, { to, idempotencyKey })` with that payload.
+- A key is 1 to 255 printable ASCII characters, without spaces at the ends. Anything else throws a `TypeError` before the call is made.
+- SMSTunnel remembers a key for 24 hours: a retry after that sends the text again.
 
 ### Enterprise (one app, several organizations)
 
@@ -153,6 +191,8 @@ Listing and revoking pairings (`listPairings()`, `unpair()`) and `createPairingT
 ---
 
 ## Server (NestJS)
+
+`SmsTunnelModule.forRoot()` and `forRootAsync()` work on NestJS 10, 11 and 12 from 2.2.0 (checked with 10.4.22, 11.2.8 and 12.3.3, in CommonJS and ESM apps). In 2.1.1 they stopped a NestJS 11 or 12 app at startup and answered 500 on NestJS 10: update before you use them. `SmsTunnelService` on its own, without the module, works in every version.
 
 ### 1. Implement a Storage Adapter
 
@@ -299,6 +339,19 @@ SmsTunnelModule.forRootAsync({
 
 To see whether that organization's phone has linked and is online: `await smsTunnelService.getEnterpriseClientStatus()` (it uses the configured `externalId`, or the one you pass).
 
+### Pairing by QR code: the callback
+
+`POST /smstunnel/create-token` (`createPairingToken()`) asks SMSTunnel for a QR code, stores its token and clears the stored API key: a new pairing replaces the old one, and `paired` is `false` until the phone scans the code. When it does, SMSTunnel posts the phone's API key to `{callbackBaseUrl}/smstunnel/callback`. That route is public, so anyone can post to it, and a callback is stored only when:
+
+- its `token` is the stored one (compared in constant time) and no API key is stored yet: each QR code links one phone, once;
+- `token` and `apiKey` are strings of visible characters (16 to 512), and `deviceId` (up to 128) and `deviceName` (up to 256) are strings when present.
+
+Anything else answers `{ success: false }` and stores nothing; your log says why, without the token or the key. To link another phone, make a new QR code or unpair first. `handlePairingCallback(body)` applies the same rules when your own controller calls it.
+
+In Enterprise mode the key arrives with this callback as well: since 2.2.0 the activation's own key is not stored.
+
+`POST /wp-json/smstunnel/v1/setup-callback`, the older WordPress-style callback, is off unless you set `enableLegacyCallback: true` (before 2.2.0 it was always mounted). With `forRootAsync()` the route stays mapped and answers 404 until the options enable it. QR pairing doesn't use it.
+
 ### Sending from your backend
 
 Inject `SmsTunnelService` anywhere in your app:
@@ -323,7 +376,8 @@ The service returns failures instead of throwing: `{ success: false, error, stat
 
 > **Breaking change (v1.2.3):** The module now ships a built-in guard
 > (`SmsTunnelAuthGuard`) that protects **every** route except the three
-> public ones (`callback`, `pairing-status/:token`, the legacy WP callback).
+> public ones (`callback`, `pairing-status/:token`, the legacy WP callback,
+> which is mounted only with `enableLegacyCallback: true` since 2.2.0).
 > If you do **not** provide an auth strategy, all non-public routes are
 > **blocked** (fail-closed) and a warning is logged at startup. Previously
 > routes were open unless you wired up your own guard.
@@ -396,7 +450,7 @@ route returns `400`.
 | `POST /smstunnel/create-token` | createToken | Yes | Generate QR |
 | `GET /smstunnel/pairing-status/:token` | pairingStatus | No | Polling proxy |
 | `POST /smstunnel/callback` | callback | No | Receive API key |
-| `POST /wp-json/smstunnel/v1/setup-callback` | setupCallbackWp | No | Older callback format |
+| `POST /wp-json/smstunnel/v1/setup-callback` | setupCallbackWp | No | Older callback format, only with `enableLegacyCallback: true` |
 | `POST /smstunnel/pair-with-key` | pairWithKey | Yes | Pair with an API key instead of a QR code |
 | `POST /smstunnel/unpair` | unpair | Yes | Disconnect device |
 | `POST /smstunnel/send` | sendSms | Yes | Send SMS `{ to, message }` |
@@ -431,14 +485,18 @@ The phone runs the SMSTunnel app from Google Play
 What I want: [describe what should send a text, to whom, and when]
 
 How it works:
-- npm install @narcisbodea/smstunnel-sdk (2.1.0 or newer; Node 18+). Plain Node.js: import {
+- npm install @narcisbodea/smstunnel-sdk (2.2.0 or newer; Node 18+). Plain Node.js: import {
   SmsTunnelNodeClient, SmsTunnelApiError } from '@narcisbodea/smstunnel-sdk/node'; new
   SmsTunnelNodeClient({ apiKey: process.env.SMSTUNNEL_API_KEY }).
-- sendSms(to, message, deviceId?, { defaultCountryCode }?) and send2FaSms(to, message, { deviceId,
-  defaultCountryCode }?) answer { success, messageId, queued }; getMessageStatus(messageId) answers
-  data.status and data.deliveryStatus. Error answers throw SmsTunnelApiError (status, code such as
-  PERMISSION_REQUIRED, permission, body; no headers: after a 429, wait a minute).
-- NestJS: SmsTunnelModule.forRoot({ storage, callbackBaseUrl, authenticate }) from
+- sendSms(to, message, deviceId?, { defaultCountryCode, idempotencyKey }?) and send2FaSms(to,
+  message, { deviceId, defaultCountryCode, idempotencyKey }?) answer { success, messageId, queued };
+  getMessageStatus(messageId) answers data.status and data.deliveryStatus. Error answers throw
+  SmsTunnelApiError (status, code such as PERMISSION_REQUIRED, permission, body, and retryAfter: the
+  seconds to wait after a 429 for too many requests). A timeout rejects with an AbortError.
+- Retries: the client never retries on its own. idempotencyKey (one new key per text, such as
+  crypto.randomUUID(), the same on every retry of that text) makes a retry within 24 hours get the
+  first answer back instead of sending a second text.
+- NestJS 10, 11 or 12: SmsTunnelModule.forRoot({ storage, callbackBaseUrl, authenticate }) from
   '@narcisbodea/smstunnel-sdk/server'; storage.getConfig() returns { serverUrl:
   'https://smstunnel.io', apiKey }, the key from SMSTUNNEL_API_KEY or saved by updateConfig() at
   pairing. Without authenticate(req) or authGuard, only callback and pairing-status are open.
@@ -463,8 +521,9 @@ Rules for your answer:
   placeholder.
 - Validate phone numbers before sending (international format, like +14155550123) and skip or report
   the invalid ones.
-- Handle errors: log or show what went wrong, retry only after 429, 5xx or network errors and only a
-  few times, and never send the same text twice.
+- Handle errors: log or show what went wrong. Retry only after a timeout, a network error or a 429
+  with retryAfter, a few times at most, always with the same idempotencyKey, so the same text never
+  goes out twice.
 - Only send texts people expect from me: alerts to myself, reminders, sign-in codes, updates they
   asked for. No unsolicited texts.
 ```
