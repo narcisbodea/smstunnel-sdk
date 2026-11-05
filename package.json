@@ -65,6 +65,25 @@
       "require": "./dist/angular/index.js"
     }
   },
+  "typesVersions": {
+    "*": {
+      "server": [
+        "./dist/server/index.d.ts"
+      ],
+      "react": [
+        "./dist/react/index.d.ts"
+      ],
+      "vue": [
+        "./dist/vue/index.d.ts"
+      ],
+      "node": [
+        "./dist/node/index.d.ts"
+      ],
+      "angular": [
+        "./dist/angular/index.d.ts"
+      ]
+    }
+  },
   "bin": {
     "smstunnel-make-certificate": "dist/cli/make-certificate.js"
   },
@@ -73,7 +92,10 @@
   ],
   "scripts": {
     "build": "tsup",
-    "dev": "tsup --watch"
+    "dev": "tsup --watch",
+    "pretest": "npm run build",
+    "test": "node --test --test-concurrency=1 \"test/*.test.*\"",
+    "prepublishOnly": "npm test"
   },
   "dependencies": {
     "qrcode-generator": "^1.4.4"
