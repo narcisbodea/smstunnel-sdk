@@ -1,3 +1,13 @@
+import type { ScheduledText, ScheduledTextsPage } from '../shared/scheduled-texts';
+
+export type {
+  ScheduledText,
+  ScheduledTextStatus,
+  ScheduledTextError,
+  ScheduledTextsPage,
+  ListScheduledQuery,
+} from '../shared/scheduled-texts';
+
 export interface SmsTunnelConfig {
   serverUrl: string;
   apiKey: string;
@@ -147,6 +157,61 @@ export interface SendSmsResult {
     queued?: boolean;
     remaining: { clean: number; total: number | string };
   };
+  /** Never set on a text sent now. `sendSms()` with `sendAt` answers {@link ScheduleSmsResult}. */
+  scheduled?: false;
+}
+
+/** Options for `SmsTunnelService.sendSms()`. */
+export interface SendSmsOptions {
+  /**
+   * Schedule the text instead of sending it now: SMSTunnel keeps it and, at this time, sends it exactly as if
+   * `sendSms()` were called then, with the same key (its default phone, and the plan's daily allowance of that
+   * moment). From 1 minute to 30 days ahead; if the phone is offline then, the text waits for it, up to 3 days.
+   *
+   * A `Date`, or an ISO 8601 date and time with its offset (`'2026-11-16T09:00:00+02:00'`); it goes out as
+   * `toISOString()`. An invalid date, or a string without its offset, answers `{ success: false, error }` and
+   * nothing is sent.
+   */
+  sendAt?: Date | string;
+}
+
+/** The answer of `sendSms()` with `sendAt`: the text SMSTunnel keeps to send then, or the failure. */
+export interface ScheduleSmsResult {
+  success: boolean;
+  /** `true` when SMSTunnel kept the text. Missing on a failure. */
+  scheduled?: true;
+  /** For `getScheduled()` and `cancelScheduled()`. */
+  scheduledId?: string;
+  /** When it goes out, ISO 8601 in UTC. */
+  sendAt?: string;
+  data?: ScheduledText;
+  /** Not set: a scheduled text gets its `messageId` when it goes out (see `getScheduled()`). */
+  messageId?: undefined;
+  /** On a failure: what went wrong in words, the HTTP status and, mostly, a code such as `SCHEDULE_TOO_SOON`. */
+  error?: string;
+  status?: number;
+  code?: string;
+  /** With `code: 'SCHEDULE_LIMIT_REACHED'`: how many texts the plan lets wait at once. */
+  max?: number;
+}
+
+/** The answer of `listScheduled()`. */
+export interface ListScheduledResult {
+  success: boolean;
+  data?: ScheduledTextsPage;
+  error?: string;
+  status?: number;
+  code?: string;
+}
+
+/** The answer of `getScheduled()` and `cancelScheduled()`. */
+export interface ScheduledTextResult {
+  success: boolean;
+  data?: ScheduledText;
+  /** On a failure, e.g. 404 `SCHEDULE_NOT_FOUND`, or 409 `SCHEDULE_NOT_EDITABLE` when it already went out. */
+  error?: string;
+  status?: number;
+  code?: string;
 }
 
 /** Where a text is now. `unconfirmed`: handed to the SIM, but the phone got no confirmation (final, never retried). */

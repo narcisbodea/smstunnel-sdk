@@ -15,10 +15,14 @@ export interface SmsTunnelErrorBody {
    * - `PERMISSION_REQUIRED`: the API key lacks a permission (see `permission`), such as `sms:inbox` for received texts.
    * - `CONCURRENT_ACTIVATION` / `ALREADY_CONNECTED`: two Enterprise activations of one client overlapped.
    * - `DISABLED_BY_SUPPORT`: SMSTunnel support turned the key or the phone off.
+   * - `SCHEDULE_*`: a scheduled text was refused, e.g. `SCHEDULE_TOO_SOON`, `SCHEDULE_LIMIT_REACHED` (see `max`),
+   *   `SCHEDULE_NOT_FOUND` or `SCHEDULE_NOT_EDITABLE` (it already went out or was canceled).
    */
   code?: string;
   /** With `PERMISSION_REQUIRED`: the permission the key lacks. */
   permission?: string;
+  /** With `SCHEDULE_LIMIT_REACHED`: how many texts the plan lets wait at once. */
+  max?: number;
   [key: string]: unknown;
 }
 
@@ -36,11 +40,14 @@ export function errorMessageOf(body: unknown, status: number): string {
  *
  * Statuses worth handling:
  * - 401: the API key is wrong, expired, or its account is suspended.
+ * - 400 with a `SCHEDULE_*` code: a scheduled text was refused (`SCHEDULE_TOO_SOON`, `SCHEDULE_TOO_FAR`, ...).
  * - 403: the key lacks a permission (`code: 'PERMISSION_REQUIRED'`), or the text needs a higher plan (Maximum
- *   privacy: an encrypted text without `to`, or a sealed one, needs Professional or Enterprise).
- * - 404: no such message or phone for this key.
+ *   privacy: an encrypted text without `to`, or a sealed one, needs Professional or Enterprise), or as many texts
+ *   wait as the plan allows (`code: 'SCHEDULE_LIMIT_REACHED'`, with `max` in the body).
+ * - 404: no such message, phone or scheduled text for this key.
  * - 409 with `code: 'IDEMPOTENCY_KEY_IN_PROGRESS'`: a request with the same `idempotencyKey` is still running; try
- *   again after `retryAfter` seconds to get its answer.
+ *   again after `retryAfter` seconds to get its answer. With `code: 'SCHEDULE_NOT_EDITABLE'`: the scheduled text
+ *   already went out or was canceled.
  * - 422 with `code: 'IDEMPOTENCY_KEY_REUSED'`: the `idempotencyKey` was already used for a different text.
  * - 429: too many requests (`retryAfter` says when to try again), or a daily limit is reached (no `retryAfter`).
  */

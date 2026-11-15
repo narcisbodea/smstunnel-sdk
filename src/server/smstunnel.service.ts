@@ -5,6 +5,7 @@ import { sealText } from '../shared/sealed-crypto';
 import type { SealedCertificate } from '../shared/sealed-crypto';
 import { failureOf, readBody } from '../shared/api-error';
 import { pairingTokenOf } from '../shared/pairing-token';
+import { scheduledListQueryOf, scheduledPathOf, sendAtOf } from '../shared/scheduled-texts';
 import { describeForLog, isStoredToken, readLegacyCallback, readPairingCallback } from './smstunnel.callback';
 import type { CallbackFields } from './smstunnel.callback';
 import type {
@@ -12,6 +13,11 @@ import type {
   SmsTunnelModuleOptions,
   SmsTunnelStatus,
   SendSmsResult,
+  SendSmsOptions,
+  ScheduleSmsResult,
+  ListScheduledQuery,
+  ListScheduledResult,
+  ScheduledTextResult,
   SendBulkResult,
   CreateTokenResult,
   PairingStatusResult,
@@ -363,9 +369,26 @@ export class SmsTunnelService {
   }
 
   /**
+   * Schedule an SMS: with `options.sendAt`, SMSTunnel keeps it and sends it then (see {@link SendSmsOptions}).
+   * Answers `{ success: true, scheduled: true, scheduledId, sendAt, data }`, or the failure.
+   */
+  sendSms(to: string, message: string, options: SendSmsOptions & { sendAt: Date | string }): Promise<ScheduleSmsResult>;
+  /**
    * Send SMS via SMSTunnel API.
    */
-  async sendSms(to: string, message: string): Promise<SendSmsResult> {
+  sendSms(to: string, message: string, options?: SendSmsOptions & { sendAt?: undefined }): Promise<SendSmsResult>;
+  /** With a `sendAt` that may be undefined, the answer is either kind: `result.scheduled` tells them apart. */
+  sendSms(to: string, message: string, options?: SendSmsOptions): Promise<SendSmsResult | ScheduleSmsResult>;
+  async sendSms(to: string, message: string, options?: SendSmsOptions): Promise<SendSmsResult | ScheduleSmsResult> {
+    let sendAt: string | undefined;
+    if (options?.sendAt !== undefined) {
+      try {
+        sendAt = sendAtOf(options.sendAt);
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    }
+
     const config = await this.options.storage.getConfig();
 
     if (!config.apiKey) {
@@ -391,10 +414,21 @@ export class SmsTunnelService {
           'Content-Type': 'application/json',
           'X-API-Key': config.apiKey,
         },
-        body: JSON.stringify({ to, message }),
+        body: JSON.stringify({ to, message, ...(sendAt ? { sendAt } : {}) }),
       });
 
       const data: any = await readBody(res);
+
+      if (res.ok && data?.success && data.scheduled === true) {
+        this.logger.log(`SMS scheduled via SMSTunnel: ${data.scheduledId} for ${data.sendAt}`);
+        return {
+          success: true,
+          scheduled: true,
+          scheduledId: data.scheduledId,
+          sendAt: data.sendAt,
+          ...(data.data ? { data: data.data } : {}),
+        };
+      }
 
       if (res.ok && data?.success) {
         this.logger.log(`SMS sent via SMSTunnel: ${data.messageId}`);
@@ -623,6 +657,55 @@ export class SmsTunnelService {
     }
     const qs = params.toString();
     return this.apiGet(`/api/v1/sms/received${qs ? `?${qs}` : ''}`);
+  }
+
+  // ─── Scheduled texts ───────────────────────────────
+
+  /**
+   * The texts the stored key scheduled (`sendSms()` with `sendAt`; needs `sms:read`): by default the ones still
+   * waiting, soonest first; `{ scope: 'done' }` for the ones that went out, failed or were canceled (kept 30 days).
+   * `data.waiting` counts every waiting text of the account and `data.max` is the plan's cap.
+   */
+  async listScheduled(query?: ListScheduledQuery): Promise<ListScheduledResult> {
+    let path: string;
+    try {
+      path = scheduledListQueryOf(query);
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+    return this.apiGet(path);
+  }
+
+  /**
+   * One text the stored key scheduled (needs `sms:read`). Once it went out, `data.messageId` is set: follow it with
+   * `getSmsStatus()`. Another key's text, or none: `{ success: false, status: 404, code: 'SCHEDULE_NOT_FOUND' }`.
+   */
+  async getScheduled(scheduledId: string): Promise<ScheduledTextResult> {
+    let path: string;
+    try {
+      path = scheduledPathOf(scheduledId);
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+    return this.apiGet(path);
+  }
+
+  /**
+   * Cancel a text the stored key scheduled, while it still waits (needs `sms:send`): answers it with
+   * `status: 'canceled'`. Once it went out or was canceled: `{ success: false, status: 409, code: 'SCHEDULE_NOT_EDITABLE' }`.
+   */
+  async cancelScheduled(scheduledId: string): Promise<ScheduledTextResult> {
+    let path: string;
+    try {
+      path = scheduledPathOf(scheduledId);
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+    const config = await this.options.storage.getConfig();
+    if (!config.apiKey || !config.serverUrl) {
+      return { success: false, error: 'SMSTunnel is not configured.' };
+    }
+    return this.request(config.serverUrl, config.apiKey, 'DELETE', path);
   }
 
   // ─── Devices & Account ─────────────────────────────
@@ -918,7 +1001,7 @@ export class SmsTunnelService {
   private async request(
     serverUrl: string,
     apiKey: string,
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     body?: unknown,
   ): Promise<any> {

@@ -24,6 +24,8 @@
  * HTTP `status`, the `code` (e.g. `PERMISSION_REQUIRED`), `retryAfter` and the body.
  *
  * The client never retries on its own. To retry a send safely, give it an `idempotencyKey` (see {@link SendOptions}).
+ *
+ * To send a text later, give `sendSms()` a `sendAt` (see {@link SendSmsOptions}).
  */
 
 import {
@@ -35,6 +37,8 @@ import { sealText } from '../shared/sealed-crypto';
 import type { SealedCertificate } from '../shared/sealed-crypto';
 import { SmsTunnelApiError, readBody, retryAfterOf } from '../shared/api-error';
 import { pairingTokenOf } from '../shared/pairing-token';
+import { scheduledListQueryOf, scheduledPathOf, sendAtOf } from '../shared/scheduled-texts';
+import type { ListScheduledQuery, ScheduledText, ScheduledTextsPage } from '../shared/scheduled-texts';
 
 // ─── Options ────────────────────────────────────────
 
@@ -74,6 +78,21 @@ export interface SendOptions {
   idempotencyKey?: string;
 }
 
+/** Options for {@link SmsTunnelNodeClient.sendSms}: those of a plain text, and `sendAt` to send it later. */
+export interface SendSmsOptions extends SendOptions {
+  /**
+   * Schedule the text instead of sending it now: SMSTunnel keeps it and, at this time, sends it exactly as if you had
+   * called `sendSms()` then, with the same key (the phone given here or the default one, the country code, and the
+   * plan's daily allowance of that moment). From 1 minute to 30 days ahead; if the phone is offline then, the text
+   * waits for it, up to 3 days.
+   *
+   * A `Date`, or an ISO 8601 date and time with its offset (`'2026-11-16T09:00:00+02:00'`); it goes out as
+   * `toISOString()`. An invalid date, or a string without its offset, throws a `TypeError` before the call is made.
+   * With `idempotencyKey`, a retry gets the same scheduled text back.
+   */
+  sendAt?: Date | string;
+}
+
 /** Options for an encrypted text you encrypted yourself. */
 export interface SendEncryptedOptions {
   is2FA?: boolean;
@@ -102,6 +121,31 @@ export interface SendSmsResponse {
     remaining: { clean: number; total: number | string };
   };
   error?: string;
+  /** Never set on a text sent now. A scheduled send answers {@link ScheduleSmsResponse}, with `scheduled: true`. */
+  scheduled?: false;
+}
+
+/** The answer of `sendSms()` with `sendAt`: SMSTunnel keeps the text and sends it then. */
+export interface ScheduleSmsResponse {
+  success: boolean;
+  scheduled: true;
+  /** For {@link SmsTunnelNodeClient.getScheduled} and {@link SmsTunnelNodeClient.cancelScheduled}. */
+  scheduledId: string;
+  /** When it goes out, ISO 8601 in UTC. */
+  sendAt: string;
+  data: ScheduledText;
+}
+
+/** The answer of {@link SmsTunnelNodeClient.listScheduled}. */
+export interface ListScheduledResponse {
+  success: boolean;
+  data: ScheduledTextsPage;
+}
+
+/** The answer of {@link SmsTunnelNodeClient.getScheduled} and {@link SmsTunnelNodeClient.cancelScheduled}. */
+export interface ScheduledTextResponse {
+  success: boolean;
+  data: ScheduledText;
 }
 
 export interface SendBulkSmsResponse {
@@ -349,14 +393,69 @@ export class SmsTunnelNodeClient {
 
   // ─── SMS ────────────────────────────────────────────
 
+  /**
+   * Schedule a single SMS: with `options.sendAt`, SMSTunnel keeps it and sends it then (see
+   * {@link SendSmsOptions.sendAt}). Cancel it with {@link cancelScheduled} while it waits.
+   */
+  sendSms(
+    to: string,
+    message: string,
+    deviceId: string | undefined,
+    options: SendSmsOptions & { sendAt: Date | string },
+  ): Promise<ScheduleSmsResponse>;
   /** Send a single SMS. With `options.idempotencyKey`, a retry can't send it twice. */
+  sendSms(
+    to: string,
+    message: string,
+    deviceId?: string,
+    options?: SendOptions & { sendAt?: undefined },
+  ): Promise<SendSmsResponse>;
+  /** With a `sendAt` that may be undefined, the answer is either kind: `result.scheduled` tells them apart. */
+  sendSms(
+    to: string,
+    message: string,
+    deviceId?: string,
+    options?: SendSmsOptions,
+  ): Promise<SendSmsResponse | ScheduleSmsResponse>;
   async sendSms(
     to: string,
     message: string,
     deviceId?: string,
-    options?: SendOptions,
-  ): Promise<SendSmsResponse> {
-    return this.post('/api/v1/sms/send', { to, message, deviceId, ...countryCode(options) }, options?.idempotencyKey);
+    options?: SendSmsOptions,
+  ): Promise<SendSmsResponse | ScheduleSmsResponse> {
+    // Checked before anything is asked of SMSTunnel: a bad sendAt throws, and nothing is sent.
+    const sendAt = options?.sendAt !== undefined ? { sendAt: sendAtOf(options.sendAt) } : {};
+    return this.post(
+      '/api/v1/sms/send',
+      { to, message, deviceId, ...countryCode(options), ...sendAt },
+      options?.idempotencyKey,
+    );
+  }
+
+  /**
+   * The texts this API key scheduled (needs `sms:read`): by default the ones still waiting, soonest first;
+   * `{ scope: 'done' }` for the ones that went out, failed or were canceled (kept 30 days), newest first. Texts
+   * scheduled in the dashboard or with another key aren't listed; `data.waiting` counts every waiting text of the
+   * account and `data.max` is the plan's cap.
+   */
+  async listScheduled(query?: ListScheduledQuery): Promise<ListScheduledResponse> {
+    return this.get(scheduledListQueryOf(query));
+  }
+
+  /**
+   * One text this API key scheduled (needs `sms:read`). Once it went out, `data.messageId` is set: follow it with
+   * {@link getMessageStatus}. Another key's text, or none, answers 404 with `code: 'SCHEDULE_NOT_FOUND'`.
+   */
+  async getScheduled(scheduledId: string): Promise<ScheduledTextResponse> {
+    return this.get(scheduledPathOf(scheduledId));
+  }
+
+  /**
+   * Cancel a text this API key scheduled, while it still waits (needs `sms:send`); answers it with
+   * `status: 'canceled'`. Once it went out or was canceled: 409 with `code: 'SCHEDULE_NOT_EDITABLE'`.
+   */
+  async cancelScheduled(scheduledId: string): Promise<ScheduledTextResponse> {
+    return this.request('DELETE', scheduledPathOf(scheduledId));
   }
 
   /**
@@ -740,7 +839,7 @@ export class SmsTunnelNodeClient {
   }
 
   private async request<T>(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     body?: unknown,
     options: { withApiKey?: boolean; idempotencyKey?: string } = {},
@@ -799,6 +898,15 @@ function idempotencyHeaders(key: unknown): { 'Idempotency-Key'?: string } {
 // `retryAfter` (seconds) comes from the answer's Retry-After header.
 export { SmsTunnelApiError } from '../shared/api-error';
 export type { SmsTunnelErrorBody } from '../shared/api-error';
+
+// ─── Scheduled texts ──────────────────────────────────────────────────────────
+export type {
+  ScheduledText,
+  ScheduledTextStatus,
+  ScheduledTextError,
+  ScheduledTextsPage,
+  ListScheduledQuery,
+} from '../shared/scheduled-texts';
 
 // ─── E2E encryptors (re-exported for standalone use) ──────────────────────────
 export {

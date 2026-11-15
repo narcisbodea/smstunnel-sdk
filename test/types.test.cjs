@@ -26,6 +26,60 @@ export const used = [SmsTunnelNodeClient, SmsTunnelModule, SmsTunnelService, Sms
 export type Used = [PairingCallbackBody, typeof ReactEntry, typeof VueEntry, typeof AngularEntry];
 `;
 
+// Scheduled texts: sendSms() answers ScheduleSmsResponse with a sendAt, SendSmsResponse without one (as before 2.3.0),
+// and either when sendAt may be undefined. Each @ts-expect-error must meet its error (TS2578 otherwise).
+const scheduledConsumer = `
+import {
+  SmsTunnelNodeClient,
+  type ListScheduledResponse,
+  type ScheduleSmsResponse,
+  type ScheduledText,
+  type ScheduledTextStatus,
+  type SendOptions,
+  type SendSmsResponse,
+} from '${pkgName}/node';
+import { SmsTunnelService, type ScheduleSmsResult, type ScheduledTextResult, type SendSmsResult } from '${pkgName}/server';
+
+declare const client: SmsTunnelNodeClient;
+declare const service: SmsTunnelService;
+declare const maybe: Date | undefined;
+declare const options: SendOptions;
+
+export async function check() {
+  const now: SendSmsResponse = await client.sendSms('+14155550123', 'Now');
+  const nowToo: SendSmsResponse = await client.sendSms('+14155550123', 'Now', 'phone-1', options);
+  const later: ScheduleSmsResponse = await client.sendSms('+14155550123', 'Later', undefined, {
+    sendAt: new Date(),
+    idempotencyKey: 'k',
+  });
+  const atText: ScheduleSmsResponse = await client.sendSms('+14155550123', 'Later', 'phone-1', { sendAt: '2026-11-16T09:00:00+02:00' });
+  const text: ScheduledText = later.data;
+  const either = await client.sendSms('+14155550123', 'Maybe', undefined, { sendAt: maybe });
+  const id: string | undefined = either.scheduled ? either.scheduledId : either.messageId;
+  // @ts-expect-error a scheduled send has no messageId yet
+  later.messageId;
+  // @ts-expect-error a text sent now has no scheduledId
+  now.scheduledId;
+  // @ts-expect-error only sendSms() takes sendAt
+  await client.send2FaSms('+14155550123', 'Code 482913', { sendAt: new Date() });
+  // @ts-expect-error sendAt is a Date or a string
+  await client.sendSms('+14155550123', 'Later', undefined, { sendAt: 1794812400000 });
+
+  const page: ListScheduledResponse = await client.listScheduled({ scope: 'done', page: 1, limit: 20 });
+  // @ts-expect-error scope is 'waiting' or 'done'
+  await client.listScheduled({ scope: 'all' });
+  const status: ScheduledTextStatus = (await client.cancelScheduled(later.scheduledId)).data.status;
+  const sent: string | null = (await client.getScheduled(later.scheduledId)).data.messageId;
+
+  const nestNow: SendSmsResult = await service.sendSms('+14155550123', 'Now');
+  const nestLater: ScheduleSmsResult = await service.sendSms('+14155550123', 'Later', { sendAt: '2026-11-16T09:00:00+02:00' });
+  const nestEither = await service.sendSms('+14155550123', 'Maybe', { sendAt: maybe });
+  const nestId: string | undefined = nestEither.scheduled ? nestEither.scheduledId : nestEither.messageId;
+  const canceled: ScheduledTextResult = await service.cancelScheduled(nestLater.scheduledId ?? '');
+  return [now, nowToo, later, atText, text, id, page, status, sent, nestNow, nestLater, nestId, canceled];
+}
+`;
+
 // An app on SDK 2.0.1 with module commonjs declares the subpath itself (an ambient module); it must keep compiling.
 const shim = `declare module '${pkgName}/server' {
   export * from '${pkgName}/dist/server/index';
@@ -120,5 +174,14 @@ describe('TypeScript finds the entry points', () => {
   it('and a project that declared the subpath itself (an ambient-module shim) still compiles', () => {
     const file = project('shim', root, { 'shim.d.ts': shim, 'app.ts': shimConsumer });
     assert.deepEqual(diagnostics([file('app.ts')], 'node10'), []);
+  });
+});
+
+describe('TypeScript types of scheduled texts', () => {
+  it('sendSms() answers the scheduled text only with a sendAt, and a text sent now without one', () => {
+    const file = project('scheduled', root, { 'index.ts': scheduledConsumer, 'package.json': '{ "private": true }' });
+    for (const mode of ['node10', 'bundler']) {
+      assert.deepEqual(diagnostics([file('index.ts')], mode), [], mode);
+    }
   });
 });
