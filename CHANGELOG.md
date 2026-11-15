@@ -1,5 +1,41 @@
 # Changelog
 
+## [2.3.0] - 2026-11-15
+
+### New: scheduled texts
+
+SMSTunnel can keep a text and send it later, 1 minute to 30 days ahead: at that time it goes out exactly as if your
+app had sent it then, with the same key (the phone, the country code, and that day's allowance). An SMSTunnel server
+from before scheduled texts refuses `sendAt` with a 400 (`property sendAt should not exist`), thrown (or, in NestJS,
+returned) like any 400, and nothing is sent.
+
+- **Node client (`/node`)**: `sendSms(to, message, deviceId?, { sendAt })` schedules the text and answers
+  `ScheduleSmsResponse`: `{ success, scheduled: true, scheduledId, sendAt, data }`, where `data` is the
+  `ScheduledText` (`id`, `to`, `message`, `sendAt`, `status`, `deviceId`, `messageId`, `error`, `createdAt`). New:
+  `listScheduled({ scope?, page?, limit? })`, `getScheduled(id)` and `cancelScheduled(id)`; refusals throw
+  `SmsTunnelApiError` with their `code` (`SCHEDULE_TOO_SOON`, `SCHEDULE_LIMIT_REACHED` with `body.max`,
+  `SCHEDULE_NOT_FOUND`, `SCHEDULE_NOT_EDITABLE`, ...). `idempotencyKey` works as for any send.
+- **NestJS (`/server`)**: `SmsTunnelService.sendSms(to, message, { sendAt })` answers `ScheduleSmsResult`, and
+  `listScheduled()`, `getScheduled(id)` and `cancelScheduled(id)` use the stored key. Failures come back as for every
+  call, `{ success: false, status, code, error }` (plus `max` for the plan's cap).
+- **`sendAt`** is a `Date` or an ISO 8601 string with its offset (`'2026-11-16T09:00:00+02:00'`), always sent as
+  `toISOString()`. An invalid date, a string without its offset (it would be read in some other time zone) or a date
+  that doesn't exist, such as 30 February, throws a `TypeError` in the Node client and answers
+  `{ success: false, error }` in NestJS, before anything is sent. The 1 minute to 30 days rule is SMSTunnel's: its
+  clock decides.
+- **Only the plain send takes `sendAt`**: encrypted texts and sign-in codes can't be scheduled.
+
+### Types
+
+- `sendSms()` has overloads: with a `sendAt` it answers `ScheduleSmsResponse` (NestJS: `ScheduleSmsResult`),
+  without one `SendSmsResponse` (NestJS: `SendSmsResult`) as before, so existing code compiles and reads the same
+  type. With a `sendAt` that may be `undefined`, it answers either, and `result.scheduled` tells them apart:
+  `SendSmsResponse` and `SendSmsResult` gain `scheduled?: false`, never set.
+- New exports: `SendSmsOptions`, `ScheduleSmsResponse`, `ListScheduledResponse`, `ScheduledTextResponse` (`/node`);
+  `SendSmsOptions`, `ScheduleSmsResult`, `ListScheduledResult`, `ScheduledTextResult` (`/server`); and in both,
+  `ScheduledText`, `ScheduledTextStatus`, `ScheduledTextError`, `ScheduledTextsPage` and `ListScheduledQuery`.
+  `SmsTunnelErrorBody` documents `max`.
+
 ## [2.2.0] - 2026-11-06
 
 ### Security: the NestJS pairing callback could store someone else's API key

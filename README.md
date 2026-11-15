@@ -163,6 +163,28 @@ for (let attempt = 1; ; attempt++) {
 - A key is 1 to 255 printable ASCII characters, without spaces at the ends. Anything else throws a `TypeError` before the call is made.
 - SMSTunnel remembers a key for 24 hours: a retry after that sends the text again.
 
+### Scheduled texts
+
+Give `sendSms()` a `sendAt` and SMSTunnel keeps the text and sends it then, 1 minute to 30 days ahead, exactly as if your app had called `sendSms()` at that time with the same key: the phone you named (or your default one), the country code, and that day's allowance. If the phone is offline then, the text waits for it, up to 3 days.
+
+```typescript
+const reminder = await client.sendSms('+40721123456', 'Reminder: your appointment is tomorrow at 10:00.', undefined, {
+  sendAt: '2026-11-16T09:00:00+02:00', // or a Date
+});
+// { success: true, scheduled: true, scheduledId, sendAt: '2026-11-16T07:00:00.000Z', data: { status: 'scheduled', ... } }
+
+await client.listScheduled();                       // this key's texts still waiting, soonest first
+await client.listScheduled({ scope: 'done' });      // sent, failed or canceled, kept 30 days
+await client.getScheduled(reminder.scheduledId);    // once sent, data.messageId works with getMessageStatus()
+await client.cancelScheduled(reminder.scheduledId); // while it waits
+```
+
+- `sendAt` is a `Date` or an ISO 8601 string with its offset, and goes out as `toISOString()`. A string without an offset (`'2026-11-16T09:00:00'`) or an invalid date throws a `TypeError` before anything is sent: the time is never guessed.
+- Only `sendSms()` takes it: encrypted texts and sign-in codes can't be scheduled. `idempotencyKey` works as for any send.
+- TypeScript: with a `sendAt`, `sendSms()` answers `ScheduleSmsResponse`; without one, `SendSmsResponse` as before; with one that may be `undefined`, either, and `result.scheduled` tells them apart.
+- A key lists and cancels only the texts it scheduled. Texts waiting at once, per plan: Free 10, Starter 50, Standard 200, Professional 500, Enterprise 1000; past that, 403 `SCHEDULE_LIMIT_REACHED` (`error.body.max`). Other refusals: 400 `SCHEDULE_TOO_SOON`, `SCHEDULE_TOO_FAR` or `SCHEDULE_INVALID_INPUT`, 404 `SCHEDULE_NOT_FOUND`, 409 `SCHEDULE_NOT_EDITABLE` (it already went out or was canceled).
+- `data.status` is `scheduled`, then `sent`, `failed` (`data.error` says why, such as `limit_reached`) or `canceled`. A failed text is never retried on its own.
+
 ### Enterprise (one app, several organizations)
 
 With the API key of an Enterprise app (it has the `enterprise:saas` permission), you can link each of your clients' phones and see whether they are online:
@@ -366,7 +388,12 @@ await smsTunnelService.sendBulk([
 
 // End-to-end encrypted: exchanges keys with the phone on first use, then only the phone reads the words.
 await smsTunnelService.encryptAndSendSms('+40721123456', 'Your code is 482913');
+
+// Later: SMSTunnel keeps it and sends it then (see Scheduled texts above).
+await smsTunnelService.sendSms('+40721123456', 'Your appointment is tomorrow at 10:00.', { sendAt: '2026-11-16T09:00:00+02:00' });
 ```
+
+`listScheduled()`, `getScheduled(id)` and `cancelScheduled(id)` work as in the Node client, with the stored key.
 
 `sendBulk()` sends one request per distinct wording (up to 100 numbers each); requests are rate-limited (30 a minute), so texts that all differ are better sent one by one.
 
@@ -485,7 +512,7 @@ The phone runs the SMSTunnel app from Google Play
 What I want: [describe what should send a text, to whom, and when]
 
 How it works:
-- npm install @narcisbodea/smstunnel-sdk (2.2.0 or newer; Node 18+). Plain Node.js: import {
+- npm install @narcisbodea/smstunnel-sdk (2.3.0 or newer; Node 18+). Plain Node.js: import {
   SmsTunnelNodeClient, SmsTunnelApiError } from '@narcisbodea/smstunnel-sdk/node'; new
   SmsTunnelNodeClient({ apiKey: process.env.SMSTUNNEL_API_KEY }).
 - sendSms(to, message, deviceId?, { defaultCountryCode, idempotencyKey }?) and send2FaSms(to,
@@ -496,6 +523,9 @@ How it works:
 - Retries: the client never retries on its own. idempotencyKey (one new key per text, such as
   crypto.randomUUID(), the same on every retry of that text) makes a retry within 24 hours get the
   first answer back instead of sending a second text.
+- Later: sendSms(to, message, deviceId?, { sendAt }) with sendAt a Date or an ISO string with its
+  offset, 1 minute to 30 days ahead, answers { scheduled: true, scheduledId, sendAt };
+  listScheduled(), getScheduled(id) and cancelScheduled(id). NestJS: sendSms(to, message, { sendAt }).
 - NestJS 10, 11 or 12: SmsTunnelModule.forRoot({ storage, callbackBaseUrl, authenticate }) from
   '@narcisbodea/smstunnel-sdk/server'; storage.getConfig() returns { serverUrl:
   'https://smstunnel.io', apiKey }, the key from SMSTUNNEL_API_KEY or saved by updateConfig() at
