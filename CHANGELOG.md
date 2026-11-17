@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.4.0] - 2026-11-17
+
+### Changed: end-to-end encryption uses the hybrid format by default
+
+A text encrypted for a phone that reads the hybrid format (`e2eVersion >= 2`: SMSTunnel app 1.0.8 or newer) now goes
+out in it, at any length and in any alphabet: Cyrillic, Arabic, Chinese, emoji, letters with diacritics. Before, the
+hybrid format needed `e2eHybrid: true`; without it every text went out in v1 (RSA alone), which carries 245 bytes:
+about 200 Latin letters, or about 100 Cyrillic or Arabic ones, 65 Chinese ones or 50 emoji.
+
+- **Node client (`/node`) and NestJS (`/server`)**: `e2eHybrid` defaults to `true`. `e2eHybrid: false` keeps every
+  payload on v1, as before.
+- **`encryptPayload(payload, key, { deviceE2eVersion: 2 })`** uses v2 without `e2eHybrid`. A phone that reads only v1,
+  or whose format isn't given, still gets v1, which every phone reads.
+- **A text too long for v1 fails before anything is sent**, with an error that says what to do:
+  `encryptPayloadV1()`, `encryptPayload()` and `encrypt()` throw `E2eV1TooLongError` (`code: 'E2E_V1_TOO_LONG'`,
+  `bytes`, `maxBytes`) instead of OpenSSL's "data too large for key size"; `encryptAndSendSms()` answers
+  `{ success: false, error }` (NestJS: with `code`).
+- **`encryptAndSendSms()` looks for the phone's format**: without `deviceE2eVersion`, the Node client uses the
+  `e2eVersion` SMSTunnel reports with the phone's key, when it does. In NestJS, a text too long for v1 on a phone
+  stored as v1-only exchanges keys again, in case SMSTunnel now reports that the phone reads the hybrid format (an
+  updated app), and tries once more.
+
+### Types
+
+- `DeviceE2EStatus` and `DevicePublicKeyInfo` gain `e2eVersion?` (`/node`, `/server`).
+- New export: `E2eV1TooLongError` (`/node`, `/server`).
+
 ## [2.3.0] - 2026-11-15
 
 ### New: scheduled texts

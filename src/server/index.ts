@@ -50,6 +50,7 @@ export type { SmsTunnelFailure, SmsTunnelErrorBody } from '../shared/api-error';
 
 // ─── E2E encryptors (Node-only; safe to import server-side) ───────────────────
 export {
+  E2eV1TooLongError,
   encryptPayload,
   encryptPayloadV1,
   encryptPayloadV2,

@@ -9,12 +9,17 @@
  *
  * Two on-the-wire formats are supported:
  *
- *   v1 (legacy, DEFAULT): RSA PKCS#1 v1.5 directly over the UTF-8 payload.
+ *   v1 (legacy): RSA PKCS#1 v1.5 directly over the UTF-8 payload. Every phone
+ *       reads it; it is used for a phone that reads nothing newer (SMSTunnel app
+ *       before 1.0.8) or whose format isn't known.
  *       transport = base64( RSA_PKCS1_v1.5_encrypt( utf8(payloadJson) ) )
- *       Limited to ~245 bytes for RSA-2048, so long messages fail.
+ *       Carries 245 bytes with RSA-2048: about 200 Latin letters after the number,
+ *       or about 100 Cyrillic, Arabic or Greek ones, 65 Chinese ones or 50 emoji.
+ *       A longer payload throws {@link E2eV1TooLongError}.
  *
- *   v2 (hybrid, opt-in): AES-256-GCM for the payload + RSA-OAEP(SHA-1) for the
- *       AES key. No payload-size limit.
+ *   v2 (hybrid, the default for a phone that reads it, `e2eVersion >= 2`):
+ *       AES-256-GCM for the payload + RSA-OAEP(SHA-1) for the AES key. No
+ *       payload-size limit.
  *       envelope  = { v:2, k, iv, ct, t }  (all base64)
  *       transport = base64( utf8( JSON.stringify(envelope) ) )
  *
@@ -63,6 +68,42 @@ export function toPublicKeyPem(key: string): string {
 }
 
 /**
+ * Thrown when a payload has to go out in the v1 format and is longer than RSA alone carries
+ * (245 bytes with an RSA-2048 key). The hybrid format (v2) has no such limit: phones with
+ * SMSTunnel app 1.0.8 or newer read it.
+ */
+export class E2eV1TooLongError extends Error {
+  /** Stable code, for callers that check it instead of the class. */
+  readonly code = 'E2E_V1_TOO_LONG';
+  /** UTF-8 bytes the payload needs. */
+  readonly bytes: number;
+  /** Bytes the phone's key carries in the v1 format. */
+  readonly maxBytes: number;
+
+  constructor(bytes: number, maxBytes: number) {
+    super(
+      `This text is too long for the phone's old encryption (v1 carries ${maxBytes} bytes, this text needs ${bytes}). ` +
+        'Phones with SMSTunnel app 1.0.8 or newer read the hybrid format, which has no length limit: update the app ' +
+        "on the phone, then give the SDK the phone's e2eVersion (2, from the pairing status) or pair the phone again.",
+    );
+    this.name = 'E2eV1TooLongError';
+    this.bytes = bytes;
+    this.maxBytes = maxBytes;
+  }
+}
+
+/** Bytes RSA PKCS#1 v1.5 carries with this key: its modulus in bytes, minus 11 (245 with RSA-2048). */
+function v1MaxBytes(pem: string): number {
+  try {
+    const bits = crypto.createPublicKey(pem).asymmetricKeyDetails?.modulusLength;
+    if (typeof bits === 'number' && bits > 0) return Math.floor(bits / 8) - 11;
+  } catch {
+    // A key Node can't read fails in publicEncrypt, with its own message.
+  }
+  return 245;
+}
+
+/**
  * Pads a JSON object so the packet's size doesn't give away how long the text is. The phone ignores
  * the extra field. Anything that isn't a JSON object passes through.
  */
@@ -81,21 +122,24 @@ function withPadding(payloadJson: string): string {
 /**
  * v1 (legacy) encryptor — RSA PKCS#1 v1.5 directly over the payload.
  *
- * This is the default format and must NOT change: existing paired devices that
- * only understand v1 rely on it.
+ * The format must NOT change: paired phones that only understand v1 rely on it.
  *
  * @param payloadJson  UTF-8 JSON payload (e.g. `{"to":"+40...","message":"..."}`).
  * @param publicKeyPem Device RSA public key, in PEM or as the bare base64 the API returns.
  * @returns base64 transport string.
- * @throws if the payload exceeds the RSA modulus capacity (~245 bytes for RSA-2048).
+ * @throws {@link E2eV1TooLongError} when the payload is longer than the key carries (245 bytes for RSA-2048).
  */
 export function encryptPayloadV1(payloadJson: string, publicKeyPem: string): string {
+  const pem = toPublicKeyPem(publicKeyPem);
+  const plaintext = Buffer.from(payloadJson, 'utf8');
+  const maxBytes = v1MaxBytes(pem);
+  if (plaintext.length > maxBytes) throw new E2eV1TooLongError(plaintext.length, maxBytes);
   const ciphertext = crypto.publicEncrypt(
     {
-      key: toPublicKeyPem(publicKeyPem),
+      key: pem,
       padding: crypto.constants.RSA_PKCS1_PADDING,
     },
-    Buffer.from(payloadJson, 'utf8'),
+    plaintext,
   );
   return ciphertext.toString('base64');
 }
@@ -142,26 +186,27 @@ export function encryptPayloadV2(payloadJson: string, publicKeyPem: string): str
 /** Options controlling which E2E format the dispatcher emits. */
 export interface EncryptPayloadOptions {
   /**
-   * Master feature flag for the v2 hybrid format. Default `false`.
-   * Mirrors `SmsTunnelModuleOptions.e2eHybrid` / backend `E2E_HYBRID_ENABLED`.
-   * When `false`, ALL messages are v1 regardless of device capability.
+   * The hybrid format (v2) for a phone that reads it. Default `true` since 2.4.0 (it was `false`).
+   * Mirrors `SmsTunnelModuleOptions.e2eHybrid` and the Node client's option.
+   * `false` keeps every payload on v1, whatever the phone reads: v1 carries 245 bytes, so a longer
+   * payload throws {@link E2eV1TooLongError}.
    */
   e2eHybrid?: boolean;
   /**
-   * The paired device's advertised E2E capability (from the backend, e.g.
-   * `device.e2eVersion`). v2 is only used when this is `>= 2`. When unknown
-   * (`undefined`), the dispatcher conservatively falls back to v1.
+   * The formats the paired phone reads (`e2eVersion` from SMSTunnel, e.g. the pairing status).
+   * v2 is used only when this is `>= 2`. When it isn't known (`undefined`), v1 is used: every phone
+   * reads it.
    */
   deviceE2eVersion?: number;
 }
 
 /**
- * Gated dispatcher. Chooses v2 ONLY when BOTH conditions hold:
- *   1. `e2eHybrid === true` (feature flag ON), AND
- *   2. `deviceE2eVersion >= 2` (device advertises v2 support).
+ * Gated dispatcher. Chooses v2 (hybrid, any length) when the phone reads it
+ * (`deviceE2eVersion >= 2`), unless `e2eHybrid` is `false`.
  *
- * Otherwise it falls back to v1 — including when the device capability is
- * unknown — so old phones are never sent a format they cannot read.
+ * Otherwise it uses v1 — also when the phone's format isn't known — so a phone is
+ * never sent a format it cannot read. v1 carries 245 bytes (RSA-2048); beyond that
+ * it throws {@link E2eV1TooLongError}.
  *
  * @returns the base64 transport string for the chosen format.
  */
@@ -171,8 +216,8 @@ export function encryptPayload(
   options?: EncryptPayloadOptions,
 ): string {
   const useV2 =
-    options?.e2eHybrid === true &&
-    typeof options.deviceE2eVersion === 'number' &&
+    options?.e2eHybrid !== false &&
+    typeof options?.deviceE2eVersion === 'number' &&
     options.deviceE2eVersion >= 2;
 
   return useV2

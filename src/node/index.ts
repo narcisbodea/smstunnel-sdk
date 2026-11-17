@@ -29,6 +29,7 @@
  */
 
 import {
+  E2eV1TooLongError,
   encryptPayload,
   encryptPayloadV1,
   encryptPayloadV2,
@@ -50,13 +51,13 @@ export interface SmsTunnelNodeClientOptions {
   /** Request timeout in ms (default: 30000) */
   timeout?: number;
   /**
-   * Opt-in to the E2E v2 hybrid format (AES-256-GCM + RSA-OAEP) when the SDK
-   * encrypts payloads itself (see `encrypt()` / `encryptAndSendSms()`).
+   * The hybrid E2E format (AES-256-GCM + RSA-OAEP, any length) for payloads the SDK encrypts
+   * itself (`encrypt()` / `encryptAndSendSms()`), for a phone that reads it (`e2eVersion >= 2`:
+   * SMSTunnel app 1.0.8 or newer). Default `true` since 2.4.0; before, it was opt-in.
    *
-   * Default `false` → all SDK-side encryption stays on the v1 (RSA PKCS#1 v1.5)
-   * format. Even when `true`, v2 is only used for a device that advertises
-   * `e2eVersion >= 2`; everything else falls back to v1. Mirrors the backend
-   * `E2E_HYBRID_ENABLED` flag and the WP `smstunnel_e2e_hybrid` option.
+   * `false` keeps every payload on v1 (RSA PKCS#1 v1.5), which carries 245 bytes: about 200
+   * Latin letters, or about 100 Cyrillic or Arabic ones, 65 Chinese ones or 50 emoji. A phone
+   * that reads only v1, or whose format isn't known, always gets v1.
    */
   e2eHybrid?: boolean;
 }
@@ -254,12 +255,16 @@ export interface DeviceE2EStatus {
   hasPublicKey: boolean;
   publicKeyFingerprint?: string;
   keyCreatedAt?: string;
+  /** The formats the phone reads, when SMSTunnel reports it here: `2` means it reads the hybrid format. */
+  e2eVersion?: number;
 }
 
 export interface DevicePublicKeyInfo {
   deviceId: string;
   deviceName: string;
   publicKey: string;
+  /** The formats the phone reads, when SMSTunnel reports it here: `2` means it reads the hybrid format. */
+  e2eVersion?: number;
 }
 
 export interface VerifyDeviceKeyResult {
@@ -388,7 +393,7 @@ export class SmsTunnelNodeClient {
     this.apiKey = options.apiKey;
     this.serverUrl = (options.serverUrl || 'https://smstunnel.io').replace(/\/$/, '');
     this.timeout = options.timeout || 30000;
-    this.e2eHybrid = options.e2eHybrid === true;
+    this.e2eHybrid = options.e2eHybrid !== false;
   }
 
   // ─── SMS ────────────────────────────────────────────
@@ -635,18 +640,19 @@ export class SmsTunnelNodeClient {
    * Encrypt a payload for a device with its RSA public key, producing the
    * `encryptedPayload` transport string.
    *
-   * Format gating: v2 (hybrid) is used ONLY when this client was constructed
-   * with `e2eHybrid: true` AND the device advertises `e2eVersion >= 2`
-   * (`deviceE2eVersion`). Otherwise it falls back to v1 (RSA PKCS#1 v1.5), so
-   * old phones are never sent a format they cannot read. When the device
-   * capability is unknown, v1 is used.
+   * Format: v2 (hybrid, any length) when the device reads it (`deviceE2eVersion >= 2`)
+   * and this client wasn't built with `e2eHybrid: false`. Otherwise v1 (RSA PKCS#1
+   * v1.5), which every phone reads, so old phones are never sent a format they cannot
+   * read. When the device's format isn't given, v1 is used.
    *
    * @param payload      the SMS payload (object is JSON-stringified) — e.g.
    *                     `{ to, message }`. Strings are passed through as-is.
    * @param publicKeyPem the device RSA public key, in PEM or as the bare base64
    *                     {@link getDevicePublicKey} returns.
-   * @param deviceE2eVersion the device's advertised E2E capability, if known
+   * @param deviceE2eVersion the formats the device reads, if known
    *                     (e.g. `e2eVersion` from {@link getE2EPairingStatus}).
+   * @throws {@link E2eV1TooLongError} when v1 is used and the payload is longer than
+   *                     245 bytes (RSA-2048).
    */
   encrypt(
     payload: string | Record<string, any>,
@@ -664,9 +670,10 @@ export class SmsTunnelNodeClient {
    * Convenience: fetch the device public key, encrypt `{ to, message }` with
    * the gated format, and send it as an encrypted SMS in one call.
    *
-   * Pass `deviceE2eVersion` if you know the device's advertised capability
-   * (from the backend); without it the call stays on v1 even when
-   * `e2eHybrid` is enabled.
+   * The device's format is `deviceE2eVersion` when you give it (e.g. from the
+   * pairing status), else the `e2eVersion` SMSTunnel reports with the key, when it
+   * does. Without either, the call uses v1, which carries 245 bytes: a longer text
+   * answers `{ success: false, error }` and nothing is sent.
    *
    * Every call encrypts anew, so a retry is a different payload. For a retry that can't send twice, encrypt once with
    * {@link encrypt} and send that payload with {@link sendEncryptedSms} and an `idempotencyKey`.
@@ -683,7 +690,14 @@ export class SmsTunnelNodeClient {
       return { success: false, error: 'Device has no public key. Enable encryption in the SMSTunnel app.' };
     }
 
-    const encryptedPayload = this.encrypt({ to, message }, publicKeyPem, options?.deviceE2eVersion);
+    const deviceE2eVersion = options?.deviceE2eVersion ?? keyRes?.data?.e2eVersion;
+    let encryptedPayload: string;
+    try {
+      encryptedPayload = this.encrypt({ to, message }, publicKeyPem, deviceE2eVersion);
+    } catch (err) {
+      if (err instanceof E2eV1TooLongError) return { success: false, error: err.message };
+      throw err;
+    }
 
     return this.sendEncryptedSms(encryptedPayload, deviceId, {
       to,
@@ -910,6 +924,7 @@ export type {
 
 // ─── E2E encryptors (re-exported for standalone use) ──────────────────────────
 export {
+  E2eV1TooLongError,
   encryptPayload,
   encryptPayloadV1,
   encryptPayloadV2,

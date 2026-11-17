@@ -55,15 +55,14 @@ export interface SmsTunnelModuleOptions {
   externalId?: string;
 
   /**
-   * Opt-in to the E2E v2 hybrid format (AES-256-GCM + RSA-OAEP) for payloads
-   * the SDK encrypts itself (`SmsTunnelService.encrypt()` /
-   * `encryptAndSendSms()`).
+   * The hybrid E2E format (AES-256-GCM + RSA-OAEP, any length) for payloads the SDK
+   * encrypts itself (`SmsTunnelService.encrypt()` / `encryptAndSendSms()`), for a
+   * phone that reads it (stored `deviceE2eVersion >= 2`: SMSTunnel app 1.0.8 or
+   * newer). Default `true` since 2.4.0; before, it was opt-in.
    *
-   * Defaults to `false` → all SDK-side encryption stays on the v1
-   * (RSA PKCS#1 v1.5) format, so paired phones that only understand v1 keep
-   * working. Even when `true`, v2 is only used for a device that advertises
-   * `e2eVersion >= 2`; everything else falls back to v1. Mirrors the backend
-   * `E2E_HYBRID_ENABLED` flag and the WordPress `smstunnel_e2e_hybrid` option.
+   * `false` keeps every payload on v1 (RSA PKCS#1 v1.5), which carries 245 bytes:
+   * about 200 Latin letters, or about 100 Cyrillic or Arabic ones, 65 Chinese ones or
+   * 50 emoji. A phone that reads only v1, or whose format isn't known, always gets v1.
    */
   e2eHybrid?: boolean;
 
@@ -357,12 +356,16 @@ export interface DeviceE2EStatus {
   hasPublicKey: boolean;
   publicKeyFingerprint?: string;
   keyCreatedAt?: string;
+  /** The formats the phone reads, when SMSTunnel reports it here: `2` means it reads the hybrid format. */
+  e2eVersion?: number;
 }
 
 export interface DevicePublicKeyInfo {
   deviceId: string;
   deviceName: string;
   publicKey: string;
+  /** The formats the phone reads, when SMSTunnel reports it here: `2` means it reads the hybrid format. */
+  e2eVersion?: number;
 }
 
 export interface VerifyDeviceKeyResult {

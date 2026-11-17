@@ -79,8 +79,9 @@ await client.sendEncryptedSms('encrypted-payload', 'device-id', {
   expectedFingerprint: 'a1b2c3d4',
 });
 
-// Or in one call: fetches the phone's key, encrypts and sends.
-await client.encryptAndSendSms('+14155550123', 'Your order has shipped.', 'device-id');
+// Or in one call: fetches the phone's key, encrypts and sends. With the phone's e2eVersion (2, from the
+// pairing status) the text can be any length, in any alphabet; without it, 245 bytes (see "Formats" below).
+await client.encryptAndSendSms('+14155550123', 'Your order has shipped.', 'device-id', { deviceE2eVersion: 2 });
 
 // Maximum privacy (Professional and Enterprise plans): the number is sealed too.
 // Make the certificate in your dashboard, or with: npx -p @narcisbodea/smstunnel-sdk smstunnel-make-certificate
@@ -868,6 +869,15 @@ All SDKs support end-to-end encryption using RSA-2048. The device holds the priv
 5. Device decrypts with its private key
 
 `encryptAndSendSms()` (`/node` and `/server`) does steps 2 to 4 in one call.
+
+### Formats
+
+The SDK encrypts in the best format the phone reads:
+
+- **Hybrid (v2)**, AES-256-GCM with RSA-OAEP: any length, any alphabet (Cyrillic, Arabic, Chinese, emoji, letters with diacritics). Phones with SMSTunnel app 1.0.8 or newer read it (`e2eVersion` 2). It is the default since 2.4.0, for a phone known to read it: give the phone's `e2eVersion` (from the pairing status) to `encrypt()` or `encryptAndSendSms()`. The Node client also takes it from the key answer, and the NestJS module stores it at key exchange, when SMSTunnel reports it there.
+- **v1**, RSA alone: every phone reads it, so a phone whose format isn't known gets it. It carries 245 bytes: about 200 Latin letters after the number, or about 100 Cyrillic or Arabic ones, 65 Chinese ones or 50 emoji. A longer text fails before anything is sent: `encrypt()` throws `E2eV1TooLongError` (`code: 'E2E_V1_TOO_LONG'`), `encryptAndSendSms()` answers `{ success: false, error }`. In NestJS it first exchanges keys again, in case the phone's app was updated.
+
+`e2eHybrid: false` (Node client options, `SmsTunnelModule.forRoot()`) keeps every text on v1.
 
 Leaving `to` out, so SMSTunnel never sees the number, and sealed texts (`sendSealedSms()`) are Maximum privacy: Professional and Enterprise plans. On other plans SMSTunnel refuses them with a 403. A phone locked to a certificate refuses anything not sealed with it.
 

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { SMSTUNNEL_OPTIONS } from './smstunnel.constants';
-import { encryptPayload } from '../shared/e2e-crypto';
+import { E2eV1TooLongError, encryptPayload } from '../shared/e2e-crypto';
 import { sealText } from '../shared/sealed-crypto';
 import type { SealedCertificate } from '../shared/sealed-crypto';
 import { failureOf, readBody } from '../shared/api-error';
@@ -759,8 +759,8 @@ export class SmsTunnelService {
       const status = await this.apiGet(`${path}/e2e-status`);
       const fingerprint: string | undefined = status?.data?.publicKeyFingerprint;
 
-      // Capability negotiation: v2 (hybrid) only for a phone that reports reading it. The API-key routes don't
-      // report it yet, so a version is kept only when one is reported; otherwise 1 (v1-only), the safe default.
+      // Capability negotiation: v2 (hybrid) only for a phone that reports reading it. A version is kept only when
+      // SMSTunnel reports one with the key or the E2E status; otherwise 1 (v1-only), the safe default.
       const reported = status?.data?.e2eVersion ?? key.data.e2eVersion;
       await this.options.storage.updateConfig({
         deviceId,
@@ -870,13 +870,15 @@ export class SmsTunnelService {
    * Encrypt a payload with the stored device public key, producing the
    * `encryptedPayload` transport string.
    *
-   * Format gating (so old phones never break): the v2 hybrid format is used
-   * ONLY when `forRoot({ e2eHybrid: true })` AND the stored
-   * `deviceE2eVersion >= 2` (advertised by the device during key exchange).
-   * Otherwise it falls back to v1 (RSA PKCS#1 v1.5). If no device public key is
+   * Format gating (so old phones never break): the v2 hybrid format (any length)
+   * is used when the stored `deviceE2eVersion >= 2` (reported for the phone at
+   * key exchange), unless `forRoot({ e2eHybrid: false })`. Otherwise it uses v1
+   * (RSA PKCS#1 v1.5), which every phone reads. If no device public key is
    * stored yet, returns `null` — call `exchangeKeys()` first.
    *
    * @param payload object (JSON-stringified) or pre-serialized JSON string.
+   * @throws {@link E2eV1TooLongError} when v1 is used and the payload is longer
+   *         than 245 bytes (RSA-2048).
    */
   async encrypt(payload: string | Record<string, any>): Promise<string | null> {
     const config = await this.options.storage.getConfig();
@@ -889,7 +891,7 @@ export class SmsTunnelService {
       typeof payload === 'string' ? payload : JSON.stringify(payload);
 
     return encryptPayload(payloadJson, config.devicePublicKey, {
-      e2eHybrid: this.options.e2eHybrid === true,
+      e2eHybrid: this.options.e2eHybrid !== false,
       deviceE2eVersion: config.deviceE2eVersion,
     });
   }
@@ -897,6 +899,11 @@ export class SmsTunnelService {
   /**
    * Convenience: encrypt `{ to, message }` with the gated format and send it as
    * an encrypted SMS in one call. Exchanges keys first when none are stored yet.
+   *
+   * A text too long for v1 (245 bytes) on a phone stored as v1-only exchanges keys
+   * once more, in case SMSTunnel now reports that the phone reads the hybrid format
+   * (an updated app), and tries again. Still too long: `{ success: false, code:
+   * 'E2E_V1_TOO_LONG', error }`, and nothing is sent.
    */
   async encryptAndSendSms(
     to: string,
@@ -912,7 +919,28 @@ export class SmsTunnelService {
       return { success: false, error: 'No paired device. Pair and exchange keys first.' };
     }
 
-    const encryptedPayload = await this.encrypt({ to, message });
+    let encryptedPayload: string | null;
+    try {
+      encryptedPayload = await this.encrypt({ to, message });
+    } catch (err) {
+      if (!(err instanceof E2eV1TooLongError)) throw err;
+      // v1 for a phone stored as reading v2 means e2eHybrid: false: asking SMSTunnel again changes nothing.
+      if ((config.deviceE2eVersion ?? 1) >= 2) {
+        return { success: false, code: err.code, error: err.message };
+      }
+      // The phone is stored as v1-only, but its app may read the hybrid format by now: ask again, then retry once.
+      await this.exchangeKeys();
+      config = await this.options.storage.getConfig();
+      try {
+        encryptedPayload = await this.encrypt({ to, message });
+      } catch (again) {
+        if (again instanceof E2eV1TooLongError) return { success: false, code: again.code, error: again.message };
+        throw again;
+      }
+    }
+    if (!config.deviceId) {
+      return { success: false, error: 'No paired device. Pair and exchange keys first.' };
+    }
     if (!encryptedPayload) {
       return {
         success: false,
