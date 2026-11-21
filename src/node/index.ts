@@ -484,7 +484,11 @@ export class SmsTunnelNodeClient {
     );
   }
 
-  /** Send the same text to several numbers (up to 100 per call). The phone has to be online. */
+  /**
+   * Send the same text to several numbers (up to 100 per call). The phone has to be online.
+   *
+   * @deprecated Send one text per person with `sendSms`. This method still works and may be removed in a later major version.
+   */
   async sendBulkSms(
     to: string[],
     message: string,

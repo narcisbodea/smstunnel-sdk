@@ -593,6 +593,7 @@ export class SmsTunnelService {
    *
    * @param messages `[{ to, message }]`, or the numbers when `message` is given.
    * @returns one result per text, in your order, with its `messageId` or `error`.
+   * @deprecated Send one text per person with `sendSms`. This method still works and may be removed in a later major version.
    */
   async sendBulk(
     messages: Array<{ to: string; message: string }> | string[],

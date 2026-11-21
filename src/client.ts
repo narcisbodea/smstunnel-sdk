@@ -355,7 +355,11 @@ export class SmsTunnelClient {
     return res.json();
   }
 
-  /** Send texts to several numbers (one result per text, in your order) */
+  /**
+   * Send texts to several numbers (one result per text, in your order)
+   *
+   * @deprecated Send one text per person with `sendSms`. This method still works and may be removed in a later major version.
+   */
   async sendBulk(messages: Array<{ to: string; message: string }>): Promise<SendBulkSmsResponse> {
     const res = await fetch(`${this.baseUrl}/${this.prefix}/send-bulk`, {
       method: 'POST',

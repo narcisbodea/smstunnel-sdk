@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.4.1] - 2026-11-21
+
+### Deprecated
+
+- `sendBulkSms()` in the Node client, and `sendBulk()` with its `POST /smstunnel/send-bulk` route in NestJS, the browser
+  client and Angular. Send one text per person with `sendSms()`. They work exactly as before and may be removed in a
+  later major version.
+
 ## [2.4.0] - 2026-11-17
 
 ### Changed: end-to-end encryption uses the hybrid format by default

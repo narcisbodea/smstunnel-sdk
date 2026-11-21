@@ -176,7 +176,11 @@ export class SmsTunnelService {
     return this.post(`/${this.prefix}/send-2fa`, { to, code, template });
   }
 
-  /** Send texts to several numbers (one result per text, in your order) */
+  /**
+   * Send texts to several numbers (one result per text, in your order)
+   *
+   * @deprecated Send one text per person with `sendSms`. This method still works and may be removed in a later major version.
+   */
   sendBulk(
     messages: Array<{ to: string; message: string }>,
   ): Promise<{ success: boolean; results?: Array<{ to: string; messageId?: string; error?: string }>; error?: string }> {

@@ -161,6 +161,8 @@ export class SmsTunnelController implements OnModuleInit {
   /**
    * Send texts to several numbers: `{ messages: [{ to, message }] }`, or `{ to: [...], message }`.
    * Route: POST /{prefix}/send-bulk
+   *
+   * @deprecated Send one text per person through `send`. This route still works and may be removed in a later major version.
    */
   @Post('smstunnel/send-bulk')
   async sendBulk(

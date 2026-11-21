@@ -382,10 +382,6 @@ Inject `SmsTunnelService` anywhere in your app:
 ```typescript
 await smsTunnelService.sendSms('+40721123456', 'Your order has shipped.');
 await smsTunnelService.send2fa('+40721123456', '482913', 'Shop: {code} is your code');
-await smsTunnelService.sendBulk([
-  { to: '+40721111111', message: 'See you tomorrow at 10' },
-  { to: '+40722222222', message: 'See you tomorrow at 10' },
-]); // one result per text: { success, results: [{ to, messageId?, error? }] }
 
 // End-to-end encrypted: exchanges keys with the phone on first use, then only the phone reads the words.
 await smsTunnelService.encryptAndSendSms('+40721123456', 'Your code is 482913');
@@ -396,7 +392,7 @@ await smsTunnelService.sendSms('+40721123456', 'Your appointment is tomorrow at 
 
 `listScheduled()`, `getScheduled(id)` and `cancelScheduled(id)` work as in the Node client, with the stored key.
 
-`sendBulk()` sends one request per distinct wording (up to 100 numbers each); requests are rate-limited (30 a minute), so texts that all differ are better sent one by one.
+`sendBulk()` is deprecated: send one text per person with `sendSms()`. It still works and may be removed in a later major version.
 
 The service returns failures instead of throwing: `{ success: false, error, status, code? }`, where `error` is SMSTunnel's message in words, `status` its HTTP status, and `code` set on errors your software can act on (for example `PERMISSION_REQUIRED` from `getReceivedSms()`, which QR-pairing keys may not use).
 
@@ -483,7 +479,7 @@ route returns `400`.
 | `POST /smstunnel/unpair` | unpair | Yes | Disconnect device |
 | `POST /smstunnel/send` | sendSms | Yes | Send SMS `{ to, message }` |
 | `POST /smstunnel/send-2fa` | send2fa | Yes | `{ to, code, template? }` (`{code}` in the template is replaced) |
-| `POST /smstunnel/send-bulk` | sendBulk | Yes | `{ messages: [{ to, message }] }` or `{ to: [...], message }` |
+| `POST /smstunnel/send-bulk` (deprecated) | sendBulk | Yes | `{ messages: [{ to, message }] }` or `{ to: [...], message }` |
 | `GET /smstunnel/sms-status/:messageId` | smsStatus | Yes | Where a text is now |
 | `GET /smstunnel/received` | receivedSms | Yes | Received texts (`limit`, `page`, `since`, `phone`, `deviceId`); the key must be allowed to read them |
 | `GET /smstunnel/devices` | devices | Yes | Your phones, and which are online |
@@ -760,7 +756,6 @@ export class SmsPairingComponent {
     // SMS
     await this.sms.sendSms('+40721123456', 'Hello!');
     await this.sms.send2fa('+40721123456', '123456', 'Shop: {code} is your code');
-    await this.sms.sendBulk([{ to: '+40721111111', message: 'Hi' }]); // several recipients, one result each
     const msgStatus = await this.sms.getSmsStatus('msg-id');
     // Received SMS need a key you explicitly allowed to read them; QR-pairing keys cannot.
     const received = await this.sms.getReceivedSms({ limit: 20 });
